@@ -37,15 +37,19 @@ function buildBackendUrl(base: string, path: string): string {
 
 function getBackendConfig() {
   const baseUrl =
+    process.env.ADMIN_BACKEND_URL ??
     process.env.BACKEND_URL ??
     process.env.NEXT_PUBLIC_BACKEND_API_BASE ??
     process.env.NEXT_PUBLIC_BACKEND_URL ??
-    "http://localhost:8000";
-  const adminToken = process.env.ADMIN_TOKEN ?? process.env.BACKEND_ADMIN_TOKEN;
+    "http://localhost:8010";
+  const adminToken =
+    process.env.ADMIN_TOKEN ??
+    process.env.BACKEND_ADMIN_TOKEN ??
+    process.env.NEXT_PUBLIC_ADMIN_TOKEN;
 
   if (!adminToken) {
     throw new AdminBackendError(
-      "ADMIN_TOKEN is missing. Set the same ADMIN_TOKEN value in Admin-Dashboard/Frontend/.env.local and the Website/backend environment.",
+      "ADMIN_TOKEN is missing. Set the same ADMIN_TOKEN value in Admin-Dashboard/Frontend/.env.local and Admin-Dashboard/backend/.env.",
       500,
     );
   }
@@ -87,7 +91,7 @@ export async function fetchAdminBackend<T>(
     });
   } catch {
     throw new AdminBackendError(
-      `Could not reach the website backend at ${baseUrl}. Start the real backend first and then refresh the admin dashboard.`,
+      `Could not reach the admin backend at ${baseUrl}. Start Admin-Dashboard/backend first and then refresh the admin dashboard.`,
       502,
     );
   }
