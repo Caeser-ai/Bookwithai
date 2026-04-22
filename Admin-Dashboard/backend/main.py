@@ -2,6 +2,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from mangum import Mangum
 from api.routes import router as api_router
 from database import engine_user, engine_chat, BaseUser, BaseChat
 
@@ -48,3 +49,6 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix="/api")
+
+# Vercel serverless entry point — lifespan="off" skips create_all on every cold start
+handler = Mangum(app, lifespan="off")
