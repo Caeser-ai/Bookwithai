@@ -1,8 +1,7 @@
-import type { NextConfig } from "next";
-
 const appRoot = process.cwd();
 
-const nextConfig: NextConfig = {
+/** @type {import("next").NextConfig} */
+const nextConfig = {
   outputFileTracingRoot: appRoot,
   turbopack: {
     root: appRoot,
