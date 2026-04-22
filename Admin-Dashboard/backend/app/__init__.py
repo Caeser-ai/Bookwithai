@@ -1,2 +1,0 @@
-"""Lightweight admin backend package."""
-

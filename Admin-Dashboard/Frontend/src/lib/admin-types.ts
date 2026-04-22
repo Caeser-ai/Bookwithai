@@ -199,6 +199,31 @@ export type BackendAdminDistributionItem = {
   count: number;
 };
 
+export type BackendAdminAnalyticsUserRow = {
+  id: string;
+  name: string;
+  email: string;
+  nationality: string | null;
+  gender: string | null;
+  role: string;
+  status: string;
+  created_at: string | null;
+  last_active_at: string | null;
+  session_count: number;
+  message_count: number;
+  search_count: number;
+  trip_count: number;
+  conversion_count?: number;
+  alert_count: number;
+  feedback_count: number;
+  age?: number | null;
+  profile_completion: number;
+  engagement_score: number;
+  cabin_class: string | null;
+  seat_preference: string | null;
+  flight_timing: string | null;
+};
+
 export type BackendAdminUsersAnalyticsResponse = {
   generated_at: string;
   totals: {
@@ -214,6 +239,8 @@ export type BackendAdminUsersAnalyticsResponse = {
     guest_sessions: number;
     avg_searches_per_user: number;
     avg_messages_per_session: number;
+    /** Mean chat messages attributed to registered users (from session aggregates). */
+    avg_messages_per_user?: number;
     avg_sessions_per_user: number;
     messages_last_24h: number;
     total_searches: number;
@@ -240,28 +267,16 @@ export type BackendAdminUsersAnalyticsResponse = {
   top_prompts: BackendAdminDistributionItem[];
   top_routes: BackendAdminDistributionItem[];
   top_search_routes?: BackendAdminDistributionItem[];
-  users: Array<{
-    id: string;
-    name: string;
-    email: string;
-    nationality: string | null;
-    gender: string | null;
-    role: string;
-    status: string;
-    created_at: string | null;
-    last_active_at: string | null;
-    session_count: number;
-    message_count: number;
-    search_count: number;
-    trip_count: number;
-    alert_count: number;
-    feedback_count: number;
-    profile_completion: number;
-    engagement_score: number;
-    cabin_class: string | null;
-    seat_preference: string | null;
-    flight_timing: string | null;
-  }>;
+  users: BackendAdminAnalyticsUserRow[];
+  age_distribution?: Array<{ range: string; count: number }>;
+  aggregate_profile?: {
+    avg_completion_pct: number;
+    travel_prefs_pct: number;
+    travel_prefs_users: number;
+    completed_profiles_count: number;
+  };
+  /** Top users by engagement score (full user list, not limited to table page). */
+  power_users?: BackendAdminAnalyticsUserRow[];
 };
 
 export type BackendAdminFunnelResponse = {
@@ -333,6 +348,14 @@ export type AdminUsersTableItem = {
   displayId: string;
   name: string;
   email: string;
+  country: string;
+  age: number | null;
+  preferredClass: string;
+  searches: number;
+  conversions: number;
+  joinDateLabel: string;
+  lastActiveDateLabel: string;
+  statusTone: "active" | "inactive";
   nationality: string;
   gender: string;
   role: string;
@@ -352,10 +375,23 @@ export type AdminUsersTableItem = {
   flightTiming: string;
 };
 
+export type AdminUsersKpiCard = {
+  id: string;
+  title: string;
+  value: string;
+  change: string;
+  trend: "up" | "down" | "flat";
+  sparkline: Array<{ value: number }>;
+  stroke: string;
+};
+
 export type AdminUsersPageResponse = {
   generatedAt: string;
   generatedLabel: string;
+  /** Total registered users (for pagination copy). */
+  totalUserCount: number;
   metrics: AdminMetricCard[];
+  kpiCards: AdminUsersKpiCard[];
   growthTrend: Array<{
     label: string;
     newUsers: number;
@@ -363,6 +399,24 @@ export type AdminUsersPageResponse = {
     sessions: number;
     searches: number;
   }>;
+  ageDistribution: Array<{ range: string; count: number }>;
+  profileSummary: {
+    avgCompletionPct: number;
+    travelPrefsPct: number;
+    travelPrefsUsers: number;
+    completedProfilesCount: number;
+    onboardingNote: string;
+  };
+  engagementOverTime: Array<{ label: string; searches: number; chats: number }>;
+  sessionDuration: Array<{ duration: string; users: number }>;
+  conversionSummary: {
+    redirectRatePct: number;
+    searchToRedirectPct: number;
+    avgChatsPerUser: number;
+    avgFlightPriceLabel: string;
+  };
+  deviceNote: string;
+  powerUsers: AdminUsersTableItem[];
   distributions: {
     countries: BackendAdminDistributionItem[];
     genders: BackendAdminDistributionItem[];
@@ -428,6 +482,454 @@ export type AdminFunnelPageResponse = {
   topPrompts: BackendAdminDistributionItem[];
 };
 
+// ── New shapes powering the Figma-parity pages ─────────────────────
+
+export type BackendAdminAiPerformanceResponse = {
+  generated_at: string;
+  model_config: {
+    provider: string;
+    model: string;
+    temperature: number;
+    max_tokens: number;
+    prompt_version: string;
+    response_style: string;
+  };
+  kpis: {
+    total_conversations: number;
+    avg_messages: number;
+    engaged_sessions: number;
+    drop_off_rate: number;
+    messages_last_24h: number;
+    authenticated_sessions: number;
+    guest_sessions: number;
+    avg_response_time_ms: number | null;
+    p95_response_time_ms: number | null;
+    success_rate: number;
+  };
+  question_intents: Array<{
+    intent: string;
+    count: number;
+    percentage: number;
+    color: string;
+  }>;
+  quality: {
+    successful: { count: number; percentage: number };
+    partial: { count: number; percentage: number };
+    failed: { count: number; percentage: number };
+    out_of_context: { count: number; percentage: number };
+  };
+  hourly_load: Array<{
+    time: string;
+    requests: number;
+    concurrent: number;
+    searches: number;
+  }>;
+  conversion_funnel: Array<{
+    stage: string;
+    value: number;
+    percentage: number;
+  }>;
+  flagged_responses: Array<{
+    category: string;
+    count: number;
+    severity: string;
+    example: string;
+    status: string;
+  }>;
+  top_prompts: BackendAdminDistributionItem[];
+};
+
+export type BackendAdminFeedbackSummaryV2Response = {
+  generated_at: string;
+  totals: {
+    total: number;
+    new_today: number;
+    open: number;
+    in_review: number;
+    resolved: number;
+    dismissed: number;
+    ai_related: number;
+    avg_response_seconds: number | null;
+  };
+  categories: BackendAdminDistributionItem[];
+  priorities: BackendAdminDistributionItem[];
+  statuses: BackendAdminDistributionItem[];
+  sentiments: BackendAdminDistributionItem[];
+  sections: BackendAdminDistributionItem[];
+  trend: Array<{ date: string; count: number }>;
+  heatmap: Array<{
+    section: string;
+    count: number;
+    percentage: number;
+    trend: number;
+    positive: number;
+    neutral: number;
+    negative: number;
+  }>;
+  hottest_section: string | null;
+  trending_up_section: {
+    section: string;
+    trend: number;
+  } | null;
+  improving_section: {
+    section: string;
+    trend: number;
+  } | null;
+  recent: Array<{
+    id: string;
+    email: string | null;
+    name: string | null;
+    message_preview: string;
+    category: string;
+    priority: string;
+    status: string;
+    sentiment: string;
+    section: string;
+    created_at: string | null;
+  }>;
+  examples: {
+    positive: string[];
+    neutral: string[];
+    negative: string[];
+  };
+};
+
+export type BackendAdminRetentionResponse = {
+  generated_at: string;
+  cohorts: {
+    day_1: { cohort: number; retained: number; rate: number };
+    day_7: { cohort: number; retained: number; rate: number };
+    day_30: { cohort: number; retained: number; rate: number };
+  };
+  returning_users: { count: number; percentage: number };
+  session_split: { authenticated: number; guest: number; total: number };
+};
+
+// ── Rich page response shapes used by the Figma-parity React components ──
+
+export type AdminPlatformMetricCard = {
+  id: string;
+  title: string;
+  value: string;
+  raw: number;
+  trend: "up" | "down" | "flat";
+  change: string;
+  sparkline: number[];
+  color: "blue" | "purple" | "green" | "emerald" | "orange" | "red" | "indigo";
+  description: string;
+};
+
+export type AdminInlineMetric = {
+  id: string;
+  title: string;
+  value: string;
+  trend: "up" | "down" | "flat";
+  change: string;
+  description?: string;
+};
+
+export type AdminOverviewPageResponse = {
+  generatedAt: string;
+  generatedLabel: string;
+  platformMetrics: AdminPlatformMetricCard[];
+  aiMetrics: AdminInlineMetric[];
+  searchMetrics: AdminInlineMetric[];
+  redirectMetrics: AdminInlineMetric[];
+  retentionMetrics: Array<{
+    id: string;
+    title: string;
+    value: string;
+    trend: "up" | "down" | "flat";
+    change: string;
+    color: "blue" | "purple" | "green" | "orange";
+  }>;
+  realTimeMetrics: Array<{
+    id: string;
+    title: string;
+    value: string;
+    subtitle: string;
+    icon: "eye" | "users" | "messages" | "redirect";
+    color: "blue" | "purple" | "green" | "orange";
+  }>;
+  systemSnapshot: Array<{
+    id: string;
+    title: string;
+    value: string;
+    trend: "up" | "down" | "flat";
+    change: string;
+    disabled?: boolean;
+  }>;
+  growthTrend: Array<{
+    date: string;
+    visitors: number;
+    searches: number;
+    redirects: number;
+  }>;
+  topRoutes: Array<{ id: string; route: string; searches: number; trend: "up" | "down" }>;
+  topAirlines: Array<{ id: string; airline: string; searches: number; percentage: number }>;
+  insights: Array<{
+    id: string;
+    title: string;
+    description: string;
+    impact: "positive" | "warning";
+    metric: string;
+  }>;
+};
+
+export type AdminFunnelStage = {
+  id: string;
+  name: string;
+  count: number;
+  percentage: number;
+  color: string;
+  bgColor: string;
+  avgTime: string;
+  dropOff?: number;
+};
+
+export type AdminFunnelSegment = {
+  name: string;
+  conversion: number;
+  users: number;
+  color: string;
+};
+
+export type AdminFunnelPageV2Response = {
+  generatedAt: string;
+  generatedLabel: string;
+  stages: AdminFunnelStage[];
+  conversionTrend: Array<{
+    date: string;
+    conversion: number;
+    aiEngagement: number;
+    searchRate: number;
+  }>;
+  countrySegments: AdminFunnelSegment[];
+  registeredVsGuest: AdminFunnelSegment[];
+  timeMetrics: Array<{
+    time: string;
+    aiStart: number;
+    search: number;
+    options: number;
+    redirect: number;
+  }>;
+  pathAnalysis: Array<{
+    path: string;
+    count: number;
+    percentage: number;
+  }>;
+  dropOffPoints: Array<{
+    stage: string;
+    dropOff: number;
+    count: number;
+    reason: string;
+  }>;
+  stageDetails: Record<
+    string,
+    {
+      metrics: Array<{ label: string; value: string; color: string }>;
+      listTitle: string;
+      listItems: Array<{ label: string; value: number }>;
+    }
+  >;
+  topRoutes: BackendAdminDistributionItem[];
+  topPrompts: BackendAdminDistributionItem[];
+};
+
+export type AdminAIPerformancePageResponse = {
+  generatedAt: string;
+  generatedLabel: string;
+  modelConfig: {
+    provider: string;
+    model: string;
+    temperature: number;
+    maxTokens: number;
+    promptVersion: string;
+    responseStyle: string;
+  };
+  kpis: {
+    totalConversations: AdminInlineMetric;
+    avgMessages: AdminInlineMetric;
+    responseTime: AdminInlineMetric;
+    successRate: AdminInlineMetric;
+    dropOffRate: AdminInlineMetric;
+  };
+  questionIntents: Array<{
+    intent: string;
+    count: number;
+    percentage: number;
+    color: string;
+  }>;
+  quality: {
+    successful: { count: number; percentage: number };
+    partial: { count: number; percentage: number };
+    failed: { count: number; percentage: number };
+    outOfContext: { count: number; percentage: number };
+  };
+  hourlyLoad: Array<{
+    time: string;
+    requests: number;
+    concurrent: number;
+    searches: number;
+  }>;
+  conversionFunnel: Array<{
+    stage: string;
+    value: number;
+    percentage: number;
+  }>;
+  flaggedResponses: Array<{
+    category: string;
+    count: number;
+    severity: "critical" | "high" | "medium" | "low";
+    example: string;
+    status: string;
+  }>;
+  insights: Array<{
+    id: string;
+    title: string;
+    description: string;
+    impact: "high" | "medium";
+    metric: string;
+    icon: "message" | "target" | "chart" | "zap" | "calendar";
+  }>;
+  latencyNotice: string;
+};
+
+export type AdminFeedbackRecentRow = {
+  id: string;
+  displayId: string;
+  email: string;
+  name: string;
+  category: string;
+  priority: UiFeedbackPriority;
+  status: UiFeedbackStatus;
+  backendStatus: BackendFeedbackStatus;
+  sentiment: "Positive" | "Neutral" | "Negative";
+  section: string;
+  submittedLabel: string;
+  relativeSubmitted: string;
+  messagePreview: string;
+};
+
+export type AdminFeedbackDashboardResponse = {
+  generatedAt: string;
+  generatedLabel: string;
+  metrics: Array<{
+    id: string;
+    title: string;
+    value: string;
+    change: number;
+    icon: "messages" | "trend-up" | "alert" | "check" | "clock" | "sparkles";
+    iconColor: string;
+    iconBgColor: string;
+  }>;
+  recent: AdminFeedbackRecentRow[];
+  categories: Array<{ label: string; count: number; color: string }>;
+  priorities: Array<{ label: string; count: number; percentage: number; color: string }>;
+  sentimentTotals: { positive: number; neutral: number; negative: number };
+};
+
+export type AdminFeedbackInboxResponse = {
+  generatedAt: string;
+  generatedLabel: string;
+  counts: {
+    total: number;
+    open: number;
+    investigating: number;
+    resolved: number;
+    closed: number;
+  };
+  items: AdminFeedbackRecentRow[];
+};
+
+export type AdminFeedbackAnalyticsResponse = {
+  generatedAt: string;
+  generatedLabel: string;
+  categoryData: Array<{ name: string; value: number; color: string }>;
+  sentimentData: Array<{ name: string; value: number; color: string }>;
+  trendData: Array<{ date: string; count: number }>;
+  priorityData: Array<{ name: string; value: number; color: string }>;
+};
+
+export type AdminFeedbackSentimentResponse = {
+  generatedAt: string;
+  generatedLabel: string;
+  positive: { count: number; percentage: number };
+  neutral: { count: number; percentage: number };
+  negative: { count: number; percentage: number };
+  trend: Array<{ date: string; positive: number; neutral: number; negative: number }>;
+  examples: {
+    positive: string[];
+    neutral: string[];
+    negative: string[];
+  };
+};
+
+export type AdminFeedbackAIInsightsResponse = {
+  generatedAt: string;
+  generatedLabel: string;
+  metrics: {
+    accuracy: { value: number; delta: number };
+    confusing: { count: number; delta: number };
+    missing: { count: number; delta: number };
+    errors: { count: number; delta: number };
+  };
+  topIssues: Array<{
+    issue: string;
+    count: number;
+    severity: "critical" | "high" | "medium" | "low";
+  }>;
+};
+
+export type AdminFeedbackIssueTrackerResponse = {
+  generatedAt: string;
+  generatedLabel: string;
+  columns: Array<{
+    name: "Open" | "Investigating" | "Fix in Progress" | "Resolved" | "Closed";
+    color: string;
+    issues: Array<{
+      id: string;
+      displayId: string;
+      summary: string;
+      category: string;
+      priority: UiFeedbackPriority;
+      assigned: string;
+    }>;
+  }>;
+};
+
+export type AdminFeedbackHeatmapResponse = {
+  generatedAt: string;
+  generatedLabel: string;
+  summary: {
+    hottest: { area: string; count: number; percentage: number } | null;
+    trendingUp: { area: string; trend: number } | null;
+    improving: { area: string; trend: number } | null;
+  };
+  rows: Array<{
+    area: string;
+    feedback: number;
+    percentage: number;
+    trend: number;
+    positive: number;
+    neutral: number;
+    negative: number;
+    color: string;
+  }>;
+};
+
+export type AdminFeedbackLiveChatResponse = {
+  generatedAt: string;
+  generatedLabel: string;
+  metrics: {
+    activeConversations: number;
+    messagesPerMinute: number;
+    avgResponseSeconds: number | null;
+    failedResponses: number;
+  };
+  chats: AdminConversationCard[];
+};
+
 export type AdminBehaviorPageResponse = {
   generatedAt: string;
   generatedLabel: string;
@@ -453,4 +955,33 @@ export type AdminBehaviorPageResponse = {
     status: "Active" | "Idle";
     lastMessagePreview: string;
   }>;
+};
+
+export type AdminRetentionPageResponse = {
+  generatedAt: string;
+  generatedLabel: string;
+  metrics: AdminMetricCard[];
+  cohorts: Array<{
+    label: string;
+    cohort: number;
+    retained: number;
+    rate: number;
+    color: string;
+  }>;
+  sessionSplit: Array<{
+    label: string;
+    count: number;
+    percentage: number;
+    color: string;
+  }>;
+  returningUsers: {
+    count: number;
+    percentage: number;
+    description: string;
+  };
+  retentionTrend: Array<{
+    label: string;
+    rate: number;
+  }>;
+  notes: string[];
 };

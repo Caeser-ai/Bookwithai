@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 
-import { getFunnelV2Data } from "@/backend/admin-data";
+import { getFeedbackLiveChatData } from "@/backend/admin-data";
 import { getRouteError } from "@/backend/admin-api";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    return NextResponse.json(await getFunnelV2Data());
+    return NextResponse.json(await getFeedbackLiveChatData());
   } catch (err) {
     const { status, detail } = getRouteError(err);
     return NextResponse.json({ detail }, { status });

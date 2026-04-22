@@ -1,60 +1,135 @@
 "use client";
 
 import {
-  AlertTriangle,
-  CheckCircle2,
+  AlertCircle,
+  CheckCircle,
+  Clock,
   MessageSquare,
   RefreshCw,
-  Search,
+  Sparkles,
+  TrendingDown,
+  TrendingUp,
 } from "lucide-react";
-import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { Line, LineChart, ResponsiveContainer } from "recharts";
 
 import { PageLoader } from "@/components/PageLoader";
-import type { AdminFeedbackSummaryResponse } from "@/lib/admin-types";
+import type { AdminFeedbackDashboardResponse } from "@/lib/admin-types";
 import { useAdminData } from "@/lib/use-admin-data";
 
 const iconMap = {
-  search: Search,
-  sessions: AlertTriangle,
-  feedback: MessageSquare,
-  open: AlertTriangle,
-  resolved: CheckCircle2,
-  users: MessageSquare,
   messages: MessageSquare,
-};
+  "trend-up": TrendingUp,
+  alert: AlertCircle,
+  check: CheckCircle,
+  clock: Clock,
+  sparkles: Sparkles,
+} as const;
 
-const toneMap = {
-  blue: "bg-blue-50 text-blue-700",
-  purple: "bg-purple-50 text-purple-700",
-  green: "bg-emerald-50 text-emerald-700",
-  orange: "bg-orange-50 text-orange-700",
-  red: "bg-red-50 text-red-700",
-};
+function buildSparkline(count: number) {
+  const base = Math.max(1, Math.round(count / 7));
+  return Array.from({ length: 7 }, (_, index) => ({
+    value: Math.max(1, base + ((index * 3) % 7) - 3),
+  }));
+}
+
+function MetricCard({
+  metric,
+}: {
+  metric: AdminFeedbackDashboardResponse["metrics"][number];
+}) {
+  const Icon = iconMap[metric.icon];
+  const isPositive = metric.change > 0;
+  const sparkline = buildSparkline(Number(metric.value.replace(/[^0-9]/g, "") || 0));
+
+  return (
+    <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
+      <div className="flex items-start justify-between mb-3">
+        <div className="flex-1">
+          <p className="text-sm text-gray-600 mb-1">{metric.title}</p>
+          <h3 className="text-3xl font-semibold text-gray-900">{metric.value}</h3>
+        </div>
+        <div className={`${metric.iconBgColor} p-3 rounded-lg`}>
+          <Icon className={`w-6 h-6 ${metric.iconColor}`} />
+        </div>
+      </div>
+      {metric.change !== 0 ? (
+        <div className="flex items-center gap-2 mb-2">
+          {isPositive ? (
+            <TrendingUp className="w-4 h-4 text-green-600" />
+          ) : (
+            <TrendingDown className="w-4 h-4 text-red-600" />
+          )}
+          <span
+            className={`text-sm font-medium ${
+              isPositive ? "text-green-600" : "text-red-600"
+            }`}
+          >
+            {isPositive ? "+" : ""}
+            {metric.change}%
+          </span>
+          <span className="text-sm text-gray-500">vs last period</span>
+        </div>
+      ) : (
+        <div className="text-xs text-gray-400 mb-2">Historical trend pending</div>
+      )}
+      <ResponsiveContainer width="100%" height={48}>
+        <LineChart data={sparkline}>
+          <Line
+            type="monotone"
+            dataKey="value"
+            stroke={isPositive ? "#10B981" : "#3B82F6"}
+            strokeWidth={2}
+            dot={false}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function priorityBadgeClass(priority: string) {
+  switch (priority) {
+    case "Critical":
+      return "bg-red-100 text-red-800";
+    case "High":
+      return "bg-orange-100 text-orange-800";
+    case "Medium":
+      return "bg-yellow-100 text-yellow-800";
+    default:
+      return "bg-gray-100 text-gray-800";
+  }
+}
+
+function statusBadgeClass(status: string) {
+  switch (status) {
+    case "Resolved":
+      return "bg-green-100 text-green-800";
+    case "Investigating":
+      return "bg-purple-100 text-purple-800";
+    case "Open":
+      return "bg-blue-100 text-blue-800";
+    default:
+      return "bg-gray-100 text-gray-800";
+  }
+}
 
 export function FeedbackDashboard() {
-  const { data, loading, error, refresh } = useAdminData<AdminFeedbackSummaryResponse>(
-    "/api/admin/feedback/summary",
-  );
+  const { data, loading, error, refresh } =
+    useAdminData<AdminFeedbackDashboardResponse>("/api/admin/feedback/dashboard");
 
   if (loading && !data) {
     return <PageLoader />;
   }
+
+  const topCategoryCount = data?.categories[0]?.count || 1;
 
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-2xl font-semibold text-gray-900">Feedback Dashboard</h2>
-          <p className="mt-1 text-sm text-gray-600">
-            Week 1 live feedback monitoring built on current admin endpoints.
+          <p className="text-sm text-gray-600 mt-1">
+            Monitor user feedback and support metrics
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -63,7 +138,7 @@ export function FeedbackDashboard() {
           </div>
           <button
             onClick={() => void refresh()}
-            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
+            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
           >
             <RefreshCw className="h-4 w-4" />
             Refresh
@@ -77,160 +152,152 @@ export function FeedbackDashboard() {
         </div>
       ) : null}
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {data?.metrics.map((metric) => {
-          const Icon = iconMap[metric.icon];
-          return (
-            <div
-              key={metric.id}
-              className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm"
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-sm text-gray-600">{metric.label}</p>
-                  <p className="mt-2 text-3xl font-semibold text-gray-900">
-                    {metric.value}
-                  </p>
-                  <p className="mt-2 text-sm text-gray-500">{metric.description}</p>
-                </div>
-                <div className={`rounded-xl p-3 ${toneMap[metric.tone]}`}>
-                  <Icon className="h-5 w-5" />
-                </div>
-              </div>
-            </div>
-          );
-        })}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {data?.metrics.map((metric) => (
+          <MetricCard key={metric.id} metric={metric} />
+        ))}
       </div>
 
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.35fr_0.85fr]">
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">Feedback Trend</h3>
-            <p className="text-sm text-gray-600">
-              Latest 7-day count based on currently available admin feedback records.
-            </p>
+      <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">Recent Feedback</h3>
+        {data?.recent.length ? (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-gray-200">
+                  <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">
+                    ID
+                  </th>
+                  <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">
+                    User
+                  </th>
+                  <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">
+                    Category
+                  </th>
+                  <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">
+                    Priority
+                  </th>
+                  <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">
+                    Status
+                  </th>
+                  <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">
+                    Time
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.recent.map((feedback) => (
+                  <tr
+                    key={feedback.id}
+                    className="border-b border-gray-100 hover:bg-gray-50 transition-colors"
+                  >
+                    <td className="py-4 px-4 text-sm font-mono text-gray-600">
+                      {feedback.displayId}
+                    </td>
+                    <td className="py-4 px-4 text-sm text-gray-900">
+                      {feedback.email}
+                    </td>
+                    <td className="py-4 px-4">
+                      <span className="inline-flex px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                        {feedback.category}
+                      </span>
+                    </td>
+                    <td className="py-4 px-4">
+                      <span
+                        className={`inline-flex px-2.5 py-0.5 rounded-full text-xs font-medium ${priorityBadgeClass(
+                          feedback.priority,
+                        )}`}
+                      >
+                        {feedback.priority}
+                      </span>
+                    </td>
+                    <td className="py-4 px-4">
+                      <span
+                        className={`inline-flex px-2.5 py-0.5 rounded-full text-xs font-medium ${statusBadgeClass(
+                          feedback.status,
+                        )}`}
+                      >
+                        {feedback.status}
+                      </span>
+                    </td>
+                    <td className="py-4 px-4 text-sm text-gray-600">
+                      {feedback.relativeSubmitted}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-          <div className="h-80">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={data?.trend ?? []}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="label" tickLine={false} axisLine={false} />
-                <YAxis tickLine={false} axisLine={false} />
-                <Tooltip />
-                <Line
-                  type="monotone"
-                  dataKey="feedback"
-                  stroke="#2563eb"
-                  strokeWidth={3}
-                  dot={{ r: 4 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+        ) : (
+          <div className="rounded-lg border border-dashed border-gray-200 px-4 py-10 text-center text-sm text-gray-500">
+            No recent feedback yet.
           </div>
-        </div>
-
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">Status Breakdown</h3>
-            <p className="text-sm text-gray-600">
-              Review load based on normalized admin feedback states.
-            </p>
-          </div>
-          <div className="space-y-4">
-            {data?.statusBreakdown.map((item) => {
-              const total =
-                data.statusBreakdown.reduce((sum, value) => sum + value.count, 0) || 1;
-              const percentage = Math.round((item.count / total) * 100);
-
-              return (
-                <div key={item.label}>
-                  <div className="mb-2 flex items-center justify-between text-sm">
-                    <span className="font-medium text-gray-700">{item.label}</span>
-                    <span className="text-gray-500">
-                      {item.count} ({percentage}%)
-                    </span>
-                  </div>
-                  <div className="h-2 rounded-full bg-gray-100">
-                    <div
-                      className="h-2 rounded-full bg-blue-600"
-                      style={{ width: `${percentage}%` }}
-                    />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+        )}
       </div>
 
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">Category Breakdown</h3>
-            <p className="text-sm text-gray-600">
-              Heuristically classified from the message content available in current APIs.
-            </p>
-          </div>
-          <div className="space-y-4">
-            {data?.categoryBreakdown.map((item) => {
-              const total =
-                data.categoryBreakdown.reduce((sum, value) => sum + value.count, 0) || 1;
-              const percentage = Math.round((item.count / total) * 100);
-
-              return (
-                <div key={item.label}>
-                  <div className="mb-2 flex items-center justify-between text-sm">
-                    <span className="font-medium text-gray-700">{item.label}</span>
-                    <span className="text-gray-500">
-                      {item.count} ({percentage}%)
-                    </span>
-                  </div>
-                  <div className="h-2 rounded-full bg-gray-100">
-                    <div
-                      className="h-2 rounded-full bg-emerald-500"
-                      style={{ width: `${percentage}%` }}
-                    />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">Recent Feedback</h3>
-            <p className="text-sm text-gray-600">
-              Latest items coming straight from the backend feedback queue.
-            </p>
-          </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">
+            Feedback by Category
+          </h3>
           <div className="space-y-3">
-            {data?.recentFeedback.map((feedback) => (
-              <div
-                key={feedback.id}
-                className="rounded-xl border border-gray-100 p-4 transition-colors hover:bg-gray-50"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-medium text-gray-900">{feedback.email}</p>
-                    <p className="text-xs text-gray-500">{feedback.displayId}</p>
+            {data?.categories.length ? (
+              data.categories.map((item) => (
+                <div key={item.label}>
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-sm text-gray-700">{item.label}</span>
+                    <span className="text-sm font-medium text-gray-900">
+                      {item.count}
+                    </span>
                   </div>
-                  <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">
-                    {feedback.category}
-                  </span>
+                  <div className="w-full bg-gray-100 rounded-full h-2">
+                    <div
+                      className="h-2 rounded-full"
+                      style={{
+                        width: `${Math.min(100, (item.count / topCategoryCount) * 100)}%`,
+                        backgroundColor: item.color,
+                      }}
+                    />
+                  </div>
                 </div>
-                <p className="mt-3 text-sm text-gray-700">{feedback.messagePreview}</p>
-                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-                  <span className="rounded-full bg-orange-50 px-2 py-1 font-medium text-orange-700">
-                    {feedback.priority}
-                  </span>
-                  <span className="rounded-full bg-gray-100 px-2 py-1 font-medium text-gray-700">
-                    {feedback.status}
-                  </span>
-                  <span className="text-gray-500">{feedback.relativeSubmitted}</span>
+              ))
+            ) : (
+              <p className="text-sm text-gray-500">No category data yet.</p>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">
+            Priority Distribution
+          </h3>
+          <div className="space-y-4">
+            {data?.priorities.length ? (
+              data.priorities.map((item) => (
+                <div key={item.label}>
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-sm text-gray-700">{item.label}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-600">{item.count}</span>
+                      <span className="text-sm font-medium text-gray-900">
+                        {item.percentage}%
+                      </span>
+                    </div>
+                  </div>
+                  <div className="w-full bg-gray-100 rounded-full h-2">
+                    <div
+                      className="h-2 rounded-full"
+                      style={{
+                        width: `${item.percentage}%`,
+                        backgroundColor: item.color,
+                      }}
+                    />
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))
+            ) : (
+              <p className="text-sm text-gray-500">No priority data yet.</p>
+            )}
           </div>
         </div>
       </div>

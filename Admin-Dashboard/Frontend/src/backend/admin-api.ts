@@ -1,9 +1,12 @@
 import {
+  BackendAdminAiPerformanceResponse,
   BackendAdminBehaviorResponse,
   BackendAdminFeedbackDetail,
   BackendAdminFeedbackResponse,
+  BackendAdminFeedbackSummaryV2Response,
   BackendAdminFunnelResponse,
   BackendAdminMetricsOverviewResponse,
+  BackendAdminRetentionResponse,
   BackendAdminSessionDetail,
   BackendAdminSessionsResponse,
   BackendAdminUsersAnalyticsResponse,
@@ -37,24 +40,31 @@ function buildBackendUrl(base: string, path: string): string {
 
 function getBackendConfig() {
   const baseUrl =
-    process.env.ADMIN_BACKEND_URL ??
     process.env.BACKEND_URL ??
     process.env.NEXT_PUBLIC_BACKEND_API_BASE ??
     process.env.NEXT_PUBLIC_BACKEND_URL ??
-    "http://localhost:8010";
-  const adminToken =
-    process.env.ADMIN_TOKEN ??
-    process.env.BACKEND_ADMIN_TOKEN ??
-    process.env.NEXT_PUBLIC_ADMIN_TOKEN;
+    "http://localhost:8000";
+  const adminToken = process.env.ADMIN_TOKEN ?? process.env.BACKEND_ADMIN_TOKEN;
 
   if (!adminToken) {
     throw new AdminBackendError(
-      "ADMIN_TOKEN is missing. Set the same ADMIN_TOKEN value in Admin-Dashboard/Frontend/.env.local and Admin-Dashboard/backend/.env.",
+      "ADMIN_TOKEN is missing. Set the same ADMIN_TOKEN value in Admin-Dashboard/Frontend/.env.local and the Website/backend environment.",
       500,
     );
   }
 
   return { baseUrl, adminToken };
+}
+
+function getBackendTimeoutMs(): number {
+  const raw = process.env.ADMIN_BACKEND_TIMEOUT_MS;
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  if (Number.isFinite(parsed) && parsed >= 5_000) {
+    return parsed;
+  }
+  // 60s is generous enough for the first cold build of admin data, but still
+  // short enough to prevent the browser from hanging on a stuck backend.
+  return 60_000;
 }
 
 async function parseJson<T>(response: Response): Promise<T | null> {
@@ -73,6 +83,7 @@ export async function fetchAdminBackend<T>(
   init?: RequestInit,
 ): Promise<T> {
   const { baseUrl, adminToken } = getBackendConfig();
+  const timeoutMs = getBackendTimeoutMs();
   const headers = new Headers(init?.headers);
   headers.set("accept", "application/json");
   headers.set("x-admin-token", adminToken);
@@ -82,18 +93,29 @@ export async function fetchAdminBackend<T>(
   }
 
   let response: Response;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     response = await fetch(buildBackendUrl(baseUrl, path), {
       ...init,
       headers,
       cache: "no-store",
+      signal: controller.signal,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new AdminBackendError(
+        `Admin backend timed out after ${Math.round(timeoutMs / 1000)}s for ${path}.`,
+        504,
+      );
+    }
     throw new AdminBackendError(
-      `Could not reach the admin backend at ${baseUrl}. Start Admin-Dashboard/backend first and then refresh the admin dashboard.`,
+      `Could not reach the website backend at ${baseUrl}. Start the real backend first and then refresh the admin dashboard.`,
       502,
     );
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   const payload = await parseJson<{ detail?: string } & T>(response);
@@ -179,6 +201,24 @@ export async function getAdminFunnelAnalytics() {
 
 export async function getAdminBehaviorAnalytics() {
   return fetchAdminBackend<BackendAdminBehaviorResponse>("/api/admin/behavior");
+}
+
+export async function getAdminAiPerformance() {
+  return fetchAdminBackend<BackendAdminAiPerformanceResponse>(
+    "/api/admin/ai/performance",
+  );
+}
+
+export async function getAdminFeedbackSummaryV2() {
+  return fetchAdminBackend<BackendAdminFeedbackSummaryV2Response>(
+    "/api/admin/feedback/summary",
+  );
+}
+
+export async function getAdminRetention() {
+  return fetchAdminBackend<BackendAdminRetentionResponse>(
+    "/api/admin/retention",
+  );
 }
 
 export function getRouteError(err: unknown) {
