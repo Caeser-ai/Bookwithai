@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pydantic
+openai
+python-dotenv
+sqlalchemy
+alembic
+psycopg2-binary
+openpyxl
+httpx
+python-dateutil
+PyJWT
+# Optional: pip install redis — for flight search cache when REDIS_URL is set
