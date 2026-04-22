@@ -43,7 +43,7 @@ function getBackendConfig() {
     process.env.BACKEND_URL ??
     process.env.NEXT_PUBLIC_BACKEND_API_BASE ??
     process.env.NEXT_PUBLIC_BACKEND_URL ??
-    "http://localhost:8000";
+    "https://bookwithai-t9b1.vercel.app/";
   const adminToken = process.env.ADMIN_TOKEN ?? process.env.BACKEND_ADMIN_TOKEN;
 
   if (!adminToken) {
