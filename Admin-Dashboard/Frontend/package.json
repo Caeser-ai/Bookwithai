@@ -6,6 +6,7 @@
     "prebuild": "node -e \"const fs=require('fs'); const ts='next.config.ts'; const mjs='next.config.mjs'; if(fs.existsSync(ts)){fs.unlinkSync(ts); console.log('Removed stale next.config.ts');} if(!fs.existsSync(mjs)){console.error('Missing next.config.mjs'); process.exit(1);} \"",
     "dev": "next dev",
     "build": "next build",
+    "postbuild": "node -e \"const fs=require('fs'); const path=require('path'); const out=path.join('.next'); const src=path.join(out,'routes-manifest.json'); const dst=path.join(out,'routes-manifest-deterministic.json'); if(fs.existsSync(src) && !fs.existsSync(dst)){fs.copyFileSync(src,dst); console.log('Created routes-manifest-deterministic.json');} \"",
     "start": "next start",
     "lint": "eslint"
   },
