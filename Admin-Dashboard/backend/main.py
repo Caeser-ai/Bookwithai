@@ -1,13 +1,8 @@
 import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-from mangum import Mangum
 from api.routes import router as api_router
-from database import engine_user, engine_chat, BaseUser, BaseChat
-
-# Import all models so metadata is populated
-import models  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # CORS origins — read from environment so nothing is hardcoded
@@ -25,20 +20,36 @@ ALLOWED_ORIGINS: list[str] = (
 if not ALLOWED_ORIGINS:
     ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
+AUTO_CREATE_TABLES = os.getenv("AUTO_CREATE_TABLES", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    BaseUser.metadata.create_all(bind=engine_user)
-    BaseChat.metadata.create_all(bind=engine_chat)
+    if AUTO_CREATE_TABLES:
+        from database import BaseUser, BaseChat, engine_chat, engine_user
+
+        BaseUser.metadata.create_all(bind=engine_user)
+        BaseChat.metadata.create_all(bind=engine_chat)
     yield
 
 
-app = FastAPI(
+_app_kwargs = dict(
     title="Book With AI API",
     description="AI-powered travel assistant backend",
     version="1.0.0",
-    lifespan=lifespan,
 )
+
+if AUTO_CREATE_TABLES:
+    # Avoid DDL on every Vercel cold start. Use migrations in deployed envs,
+    # and opt into auto-create locally when needed.
+    _app_kwargs["lifespan"] = lifespan
+
+app = FastAPI(**_app_kwargs)
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,6 +60,3 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix="/api")
-
-# Vercel serverless entry point — lifespan="off" skips create_all on every cold start
-handler = Mangum(app, lifespan="off")

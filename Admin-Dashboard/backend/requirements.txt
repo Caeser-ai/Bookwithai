@@ -11,5 +11,4 @@ httpx
 python-dateutil
 PyJWT
 passlib[bcrypt]
-mangum
 # Optional: pip install redis — for flight search cache when REDIS_URL is set

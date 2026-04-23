@@ -40,6 +40,7 @@ function buildBackendUrl(base: string, path: string): string {
 
 function getBackendConfig() {
   const baseUrl =
+    process.env.ADMIN_BACKEND_URL ??
     process.env.BACKEND_URL ??
     process.env.NEXT_PUBLIC_BACKEND_API_BASE ??
     process.env.NEXT_PUBLIC_BACKEND_URL ??

@@ -25,16 +25,6 @@ CHAT_DATABASE_URL = (
     or DEFAULT_DATABASE_URL
 )
 
-if not USER_DATABASE_URL:
-    raise RuntimeError(
-        "USER_DATABASE_URL or DATABASE_URL must be set in the environment for the User DB."
-    )
-
-if not CHAT_DATABASE_URL:
-    raise RuntimeError(
-        "CHAT_DATABASE_URL or DATABASE_URL must be set in the environment for the Chat DB."
-    )
-
 # pool_pre_ping: validate connections before checkout; pool_recycle: avoid stale SSL / NAT timeouts
 _engine_kwargs = {
     "echo": False,
@@ -42,11 +32,27 @@ _engine_kwargs = {
     "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "1800")),
 }
 
-engine_user = create_engine(USER_DATABASE_URL, **_engine_kwargs)
-engine_chat = create_engine(CHAT_DATABASE_URL, **_engine_kwargs)
+engine_user = (
+    create_engine(USER_DATABASE_URL, **_engine_kwargs)
+    if USER_DATABASE_URL
+    else None
+)
+engine_chat = (
+    create_engine(CHAT_DATABASE_URL, **_engine_kwargs)
+    if CHAT_DATABASE_URL
+    else None
+)
 
-SessionUser = sessionmaker(autocommit=False, autoflush=False, bind=engine_user)
-SessionChat = sessionmaker(autocommit=False, autoflush=False, bind=engine_chat)
+SessionUser = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine_user,
+)
+SessionChat = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine_chat,
+)
 
 BaseUser = declarative_base()
 BaseChat = declarative_base()
@@ -60,8 +66,23 @@ def _safe_close_session(db) -> None:
         pass
 
 
+def _ensure_user_db_configured() -> None:
+    if engine_user is None:
+        raise RuntimeError(
+            "USER_DATABASE_URL or DATABASE_URL must be set in the environment for the User DB."
+        )
+
+
+def _ensure_chat_db_configured() -> None:
+    if engine_chat is None:
+        raise RuntimeError(
+            "CHAT_DATABASE_URL or DATABASE_URL must be set in the environment for the Chat DB."
+        )
+
+
 def get_user_db():
     """FastAPI dependency: yields a session for the User DB (users, trips, alerts, etc.)."""
+    _ensure_user_db_configured()
     db = SessionUser()
     try:
         yield db
@@ -71,6 +92,7 @@ def get_user_db():
 
 def get_chat_db():
     """FastAPI dependency: yields a session for the Chat DB (sessions, messages)."""
+    _ensure_chat_db_configured()
     db = SessionChat()
     try:
         yield db
