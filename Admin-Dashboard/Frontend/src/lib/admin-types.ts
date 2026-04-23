@@ -183,6 +183,19 @@ export type AdminRealtimeResponse = {
     authenticatedUsers: number;
     guestSessions: number;
   };
+  systemHealth: {
+    apiHealthStatus: "operational" | "degraded" | "down";
+    apiLatencyMs: number | null;
+    errorRatePct: number | null;
+    uptimePct: number | null;
+    endpointStatuses: Array<{
+      name: string;
+      status: "operational" | "degraded" | "down";
+      responseTimeMs: number | null;
+      errorRatePct: number | null;
+      uptimePct: number | null;
+    }>;
+  };
   sessionChart: { label: string; messages: number }[];
   activityFeed: {
     id: string;
@@ -605,6 +618,50 @@ export type BackendAdminRetentionResponse = {
   session_split: { authenticated: number; guest: number; total: number };
 };
 
+export type BackendAdminApiMonitoringResponse = {
+  generated_at: string;
+  totals: {
+    total_requests: number;
+    avg_latency_ms: number;
+    error_rate_pct: number;
+    uptime_pct: number;
+    active_endpoints: number;
+    total_endpoints: number;
+  };
+  endpoint_rows: Array<{
+    id: string;
+    name: string;
+    provider: string;
+    endpoint: string;
+    status: "healthy" | "slow" | "error";
+    requests24h: number;
+    avgResponseTimeMs: number;
+    p95Ms: number;
+    p99Ms: number;
+    errorRatePct: number;
+    uptimePct: number;
+  }>;
+  request_volume: Array<{ label: string; requests: number }>;
+  error_rate_trend: Array<{ label: string; rate: number }>;
+  provider_usage: Array<{ provider: string; requests: number }>;
+  success_failed: { success: number; failed: number };
+  api_keys: Array<{
+    provider: string;
+    keyName: string;
+    status: string;
+    lastUsed: string | null;
+    keyLast4?: string | null;
+    requests24h: number;
+  }>;
+  recent_errors: Array<{
+    id: string;
+    endpoint: string;
+    timestamp: string | null;
+    error: string;
+    statusCode: number;
+  }>;
+};
+
 // ── Rich page response shapes used by the Figma-parity React components ──
 
 export type AdminPlatformMetricCard = {
@@ -984,4 +1041,57 @@ export type AdminRetentionPageResponse = {
     rate: number;
   }>;
   notes: string[];
+};
+
+export type AdminApiMonitoringResponse = {
+  generatedAt: string;
+  generatedLabel: string;
+  kpis: Array<{
+    id: string;
+    label: string;
+    value: string;
+    change: string;
+    trend: "up" | "down" | "flat";
+    tone: "blue" | "purple" | "green" | "orange" | "red";
+    sparkline: Array<{ label: string; value: number }>;
+  }>;
+  endpointRows: Array<{
+    id: string;
+    name: string;
+    provider: string;
+    endpoint: string;
+    status: "healthy" | "slow" | "error";
+    requests24h: number;
+    avgResponseTimeMs: number;
+    p95Ms: number;
+    p99Ms: number;
+    errorRatePct: number;
+    uptimePct: number;
+  }>;
+  requestVolume: Array<{ label: string; requests: number }>;
+  errorRateTrend: Array<{ label: string; rate: number }>;
+  providerUsage: Array<{ provider: string; requests: number; color: string }>;
+  successFailed: { success: number; failed: number };
+  apiKeys: Array<{
+    provider: string;
+    keyName: string;
+    status: string;
+    lastUsed: string | null;
+    keyLast4?: string | null;
+    requests24h: number;
+  }>;
+  activeAlerts: Array<{
+    id: string;
+    type: "warning" | "error" | "info";
+    title: string;
+    message: string;
+    time: string;
+  }>;
+  errorLogs: Array<{
+    id: string;
+    endpoint: string;
+    timestamp: string;
+    error: string;
+    statusCode: number;
+  }>;
 };

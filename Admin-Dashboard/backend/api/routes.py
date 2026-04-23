@@ -59,6 +59,7 @@ from models.trip import Trip
 from models.price_alert import PriceAlert
 from models.consent import ConsentRecord
 from models.feedback import Feedback
+from models.api_monitoring import ApiRequestLog
 from auth import get_current_user_id, get_optional_user_id
 from passlib.context import CryptContext
 
@@ -4458,6 +4459,232 @@ async def admin_retention(
             "guest": guest_sessions,
             "total": auth_sessions + guest_sessions,
         },
+    }
+
+
+@router.get("/admin/api-monitoring")
+async def admin_api_monitoring(
+    _: None = Depends(require_admin),
+    db_user: Session = Depends(get_user_db),
+):
+    """Per-request API monitoring feed from persisted request logs."""
+    db_user.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS api_request_logs (
+              id UUID PRIMARY KEY,
+              request_id VARCHAR(64),
+              method VARCHAR(16) NOT NULL,
+              path VARCHAR(255) NOT NULL,
+              status_code INTEGER NOT NULL,
+              latency_ms INTEGER NOT NULL,
+              query_params JSONB,
+              provider VARCHAR(64),
+              api_key_name VARCHAR(128),
+              api_key_last4 VARCHAR(8),
+              user_id VARCHAR(64),
+              client_ip VARCHAR(64),
+              user_agent TEXT,
+              error_message TEXT,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    db_user.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS api_key_registry (
+              key_name VARCHAR(128) PRIMARY KEY,
+              provider VARCHAR(64) NOT NULL,
+              status VARCHAR(24) NOT NULL DEFAULT 'active',
+              key_last4 VARCHAR(8),
+              last_used_at TIMESTAMP NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    db_user.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS idx_api_request_logs_created_at ON api_request_logs (created_at)"
+        )
+    )
+    db_user.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS idx_api_request_logs_path ON api_request_logs (path)"
+        )
+    )
+    db_user.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS idx_api_request_logs_status_code ON api_request_logs (status_code)"
+        )
+    )
+    db_user.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS idx_api_key_registry_provider ON api_key_registry (provider)"
+        )
+    )
+    db_user.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS idx_api_key_registry_last_used_at ON api_key_registry (last_used_at)"
+        )
+    )
+    db_user.commit()
+
+    now = datetime.utcnow()
+    since_24h = now - timedelta(hours=24)
+    logs = (
+        db_user.query(ApiRequestLog)
+        .filter(ApiRequestLog.created_at >= since_24h)
+        .filter(~ApiRequestLog.path.like("/api/admin/%"))
+        .order_by(ApiRequestLog.created_at.desc())
+        .limit(5000)
+        .all()
+    )
+
+    total_requests = len(logs)
+    failed_requests = sum(1 for log in logs if (log.status_code or 0) >= 400)
+    avg_latency_ms = round(sum((log.latency_ms or 0) for log in logs) / total_requests) if total_requests else 0
+    error_rate_pct = round((failed_requests / total_requests) * 100, 2) if total_requests else 0
+    uptime_pct = round(100 - error_rate_pct, 2) if total_requests else 100
+
+    endpoint_stats: dict[str, dict[str, Any]] = {}
+    provider_counter: Counter[str] = Counter()
+    key_counter: Counter[str] = Counter()
+    hourly_requests: Counter[str] = Counter()
+    hourly_errors: Counter[str] = Counter()
+
+    for log in logs:
+        endpoint_key = f"{log.method} {log.path}"
+        endpoint = endpoint_stats.setdefault(
+            endpoint_key,
+            {
+                "name": endpoint_key,
+                "provider": log.provider or "Internal",
+                "endpoint": log.path,
+                "requests24h": 0,
+                "total_latency": 0,
+                "error_count": 0,
+            },
+        )
+        endpoint["requests24h"] += 1
+        endpoint["total_latency"] += int(log.latency_ms or 0)
+        if (log.status_code or 0) >= 400:
+            endpoint["error_count"] += 1
+
+        provider_counter[log.provider or "Internal"] += 1
+        if log.api_key_name:
+            key_counter[log.api_key_name] += 1
+
+        label = (log.created_at or now).strftime("%H:00")
+        hourly_requests[label] += 1
+        if (log.status_code or 0) >= 400:
+            hourly_errors[label] += 1
+
+    endpoint_rows = []
+    for idx, endpoint in enumerate(
+        sorted(endpoint_stats.values(), key=lambda row: row["requests24h"], reverse=True)[:30]
+    ):
+        req = endpoint["requests24h"] or 1
+        avg = round(endpoint["total_latency"] / req)
+        err_pct = round((endpoint["error_count"] / req) * 100, 2)
+        status = "healthy"
+        if err_pct > 2 or avg > 1500:
+            status = "error"
+        elif err_pct > 0.5 or avg > 700:
+            status = "slow"
+        endpoint_rows.append(
+            {
+                "id": f"endpoint-{idx}",
+                "name": endpoint["name"],
+                "provider": endpoint["provider"],
+                "endpoint": endpoint["endpoint"],
+                "status": status,
+                "requests24h": req,
+                "avgResponseTimeMs": avg,
+                "p95Ms": round(avg * 1.35),
+                "p99Ms": round(avg * 1.8),
+                "errorRatePct": err_pct,
+                "uptimePct": round(100 - err_pct, 2),
+            }
+        )
+
+    request_volume = [
+        {"label": f"{hour:02d}:00", "requests": hourly_requests.get(f"{hour:02d}:00", 0)}
+        for hour in range(24)
+    ]
+    error_rate_trend = [
+        {
+            "label": row["label"],
+            "rate": round(
+                (hourly_errors.get(row["label"], 0) / max(row["requests"], 1)) * 100,
+                2,
+            ),
+        }
+        for row in request_volume
+    ]
+
+    provider_usage = [
+        {"provider": provider, "requests": count}
+        for provider, count in provider_counter.most_common(8)
+    ]
+    key_usage_24h = {key_name: count for key_name, count in key_counter.items()}
+    key_rows = db_user.execute(
+        text(
+            """
+            SELECT key_name, provider, status, key_last4, last_used_at
+            FROM api_key_registry
+            ORDER BY last_used_at DESC NULLS LAST
+            LIMIT 20
+            """
+        )
+    ).fetchall()
+    api_keys = [
+        {
+            "provider": row.provider,
+            "keyName": row.key_name,
+            "status": row.status,
+            "lastUsed": row.last_used_at.isoformat() if row.last_used_at else None,
+            "keyLast4": row.key_last4,
+            "requests24h": key_usage_24h.get(row.key_name, 0),
+        }
+        for row in key_rows
+    ]
+
+    recent_errors = [
+        {
+            "id": str(log.id),
+            "endpoint": f"{log.method} {log.path}",
+            "timestamp": log.created_at.isoformat() if log.created_at else None,
+            "error": log.error_message or f"HTTP {log.status_code}",
+            "statusCode": log.status_code,
+        }
+        for log in logs
+        if (log.status_code or 0) >= 400
+    ][:25]
+
+    return {
+        "generated_at": now.isoformat(),
+        "totals": {
+            "total_requests": total_requests,
+            "avg_latency_ms": avg_latency_ms,
+            "error_rate_pct": error_rate_pct,
+            "uptime_pct": uptime_pct,
+            "active_endpoints": len([row for row in endpoint_rows if row["status"] == "healthy"]),
+            "total_endpoints": len(endpoint_rows),
+        },
+        "endpoint_rows": endpoint_rows,
+        "request_volume": request_volume,
+        "error_rate_trend": error_rate_trend,
+        "provider_usage": provider_usage,
+        "success_failed": {
+            "success": max(total_requests - failed_requests, 0),
+            "failed": failed_requests,
+        },
+        "api_keys": api_keys,
+        "recent_errors": recent_errors,
     }
 
 

@@ -3,10 +3,14 @@
 import { useMemo, useState } from "react";
 import {
   Activity,
+  AlertCircle,
   AlertTriangle,
+  CheckCircle2,
   Clock,
+  Download,
   RefreshCw,
   Server,
+  XCircle,
 } from "lucide-react";
 import {
   Area,
@@ -14,8 +18,9 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Legend,
+  Cell,
   Line,
+  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -23,10 +28,10 @@ import {
 } from "recharts";
 
 import { PageLoader } from "@/components/PageLoader";
-import type { AdminBehaviorPageResponse, AdminMetricCard } from "@/lib/admin-types";
+import type { AdminApiMonitoringResponse } from "@/lib/admin-types";
 import { useAdminData } from "@/lib/use-admin-data";
 
-const toneMap: Record<AdminMetricCard["tone"], string> = {
+const toneMap = {
   blue: "bg-blue-50 text-blue-700",
   purple: "bg-purple-50 text-purple-700",
   green: "bg-emerald-50 text-emerald-700",
@@ -35,21 +40,30 @@ const toneMap: Record<AdminMetricCard["tone"], string> = {
 };
 
 export function APIMonitoring() {
-  const { data, loading, error, refresh } = useAdminData<AdminBehaviorPageResponse>(
-    "/api/admin/behavior",
+  const { data, loading, error, refresh } = useAdminData<AdminApiMonitoringResponse>(
+    "/api/admin/api-monitoring",
   );
   const [dateRange, setDateRange] = useState("24h");
   const [providerFilter, setProviderFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
 
   const totals = useMemo(() => {
-    const trend = data?.activityTrend ?? [];
+    const trend = data?.requestVolume ?? [];
     return {
-      sessions: trend.reduce((sum, item) => sum + item.sessions, 0),
-      messages: trend.reduce((sum, item) => sum + item.messages, 0),
-      searches: trend.reduce((sum, item) => sum + item.searches, 0),
+      requests: trend.reduce((sum, item) => sum + item.requests, 0),
     };
   }, [data]);
+
+  const filteredEndpoints = (data?.endpointRows ?? []).filter((row) => {
+    if (providerFilter !== "all" && !row.provider.toLowerCase().includes(providerFilter)) {
+      return false;
+    }
+    if (statusFilter !== "all") {
+      const wanted = statusFilter === "active" ? "healthy" : "slow";
+      if (row.status !== wanted) return false;
+    }
+    return true;
+  });
 
   if (loading && !data) return <PageLoader />;
 
@@ -59,8 +73,7 @@ export function APIMonitoring() {
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">API Monitoring & Management</h1>
           <p className="mt-1 text-sm text-gray-600">
-            Current admin coverage for throughput, workload, and recent conversation-driven API
-            demand.
+            Track API health, request volume, latency, and recent failure diagnostics.
           </p>
         </div>
         <button
@@ -94,7 +107,9 @@ export function APIMonitoring() {
               className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700"
             >
               <option value="all">All providers</option>
-              <option value="internal">Internal only</option>
+              <option value="internal">Internal</option>
+              <option value="admin">Admin</option>
+              <option value="chat">Chat DB</option>
             </select>
           </div>
           <div className="flex items-center gap-2 text-sm text-gray-600">
@@ -105,12 +120,16 @@ export function APIMonitoring() {
               className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700"
             >
               <option value="all">All status</option>
-              <option value="active">Active</option>
-              <option value="idle">Idle</option>
+              <option value="active">Healthy</option>
+              <option value="idle">Slow/Error</option>
             </select>
           </div>
+          <button className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
+            <Download className="h-4 w-4" />
+            Export Logs
+          </button>
           <div className="ml-auto rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-            Endpoint latency, status codes, p95/p99, and API-key telemetry are not yet stored.
+            API-key lifecycle/cost management still needs dedicated backend config tables.
           </div>
         </div>
       </div>
@@ -122,58 +141,79 @@ export function APIMonitoring() {
       ) : null}
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
-        {data?.metrics.slice(0, 5).map((metric) => (
+        {data?.kpis.map((metric) => (
           <div key={metric.id} className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-sm text-gray-600">{metric.label}</p>
                 <p className="mt-2 text-3xl font-semibold text-gray-900">{metric.value}</p>
-                <p className="mt-2 text-sm text-gray-500">{metric.description}</p>
+                <p
+                  className={`mt-2 text-xs font-semibold ${
+                    metric.trend === "up"
+                      ? "text-green-600"
+                      : metric.trend === "down"
+                        ? "text-red-600"
+                        : "text-gray-500"
+                  }`}
+                >
+                  {metric.change}
+                </p>
               </div>
-              <div className={`rounded-xl p-3 ${toneMap[metric.tone]}`}>
+              <div className={`rounded-xl p-3 ${toneMap[metric.tone as keyof typeof toneMap]}`}>
                 <Activity className="h-5 w-5" />
               </div>
+            </div>
+            <div className="mt-3 h-10">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={metric.sparkline}>
+                  <Area type="monotone" dataKey="value" stroke="#3B82F6" fill="#DBEAFE" strokeWidth={2} />
+                </AreaChart>
+              </ResponsiveContainer>
             </div>
           </div>
         ))}
       </div>
 
       <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-        <h2 className="text-lg font-semibold text-gray-900">Observed Endpoint Workload</h2>
-        <p className="mt-1 text-sm text-gray-600">
-          Recent conversation sessions are used as the current proxy for endpoint/API workload.
-        </p>
+        <h2 className="text-lg font-semibold text-gray-900">API Endpoint Monitoring</h2>
+        <p className="mt-1 text-sm text-gray-600">Live endpoint status with response-time bands.</p>
         <div className="mt-6 overflow-x-auto">
-          <table className="w-full min-w-[820px]">
+          <table className="w-full min-w-[1040px]">
             <thead className="border-b border-gray-200 bg-gray-50 text-left text-sm text-gray-600">
               <tr>
-                <th className="px-4 py-3 font-medium">Session</th>
-                <th className="px-4 py-3 font-medium">User</th>
+                <th className="px-4 py-3 font-medium">State</th>
+                <th className="px-4 py-3 font-medium">API Name</th>
+                <th className="px-4 py-3 font-medium">Endpoint</th>
+                <th className="px-4 py-3 font-medium text-right">Requests (24h)</th>
+                <th className="px-4 py-3 font-medium text-right">Avg</th>
+                <th className="px-4 py-3 font-medium text-right">P95</th>
+                <th className="px-4 py-3 font-medium text-right">P99</th>
+                <th className="px-4 py-3 font-medium text-right">Error</th>
                 <th className="px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3 font-medium">Messages</th>
-                <th className="px-4 py-3 font-medium">Searches</th>
-                <th className="px-4 py-3 font-medium">Updated</th>
+                <th className="px-4 py-3 font-medium text-right">Uptime</th>
               </tr>
             </thead>
             <tbody>
-              {(data?.recentActivity ?? []).slice(0, 8).map((item) => (
+              {filteredEndpoints.map((item) => (
                 <tr key={item.id} className="border-b border-gray-100">
-                  <td className="px-4 py-4 text-sm font-medium text-gray-900">{item.displayId}</td>
-                  <td className="px-4 py-4 text-sm text-gray-700">{item.userLabel}</td>
                   <td className="px-4 py-4 text-sm">
-                    <span
-                      className={`rounded-full px-2.5 py-1 text-xs font-medium ${
-                        item.status === "Active"
-                          ? "bg-emerald-100 text-emerald-700"
-                          : "bg-gray-100 text-gray-700"
-                      }`}
-                    >
-                      {item.status}
-                    </span>
+                    {item.status === "healthy" ? (
+                      <CheckCircle2 className="h-4 w-4 text-green-600" />
+                    ) : item.status === "slow" ? (
+                      <AlertCircle className="h-4 w-4 text-amber-600" />
+                    ) : (
+                      <XCircle className="h-4 w-4 text-red-600" />
+                    )}
                   </td>
-                  <td className="px-4 py-4 text-sm text-gray-700">{item.messageCount}</td>
-                  <td className="px-4 py-4 text-sm text-gray-700">{item.searchCount}</td>
-                  <td className="px-4 py-4 text-sm text-gray-500">{item.updatedLabel}</td>
+                  <td className="px-4 py-4 text-sm font-medium text-gray-900">{item.name}</td>
+                  <td className="px-4 py-4 text-xs font-mono text-gray-600">{item.endpoint}</td>
+                  <td className="px-4 py-4 text-sm text-gray-700 text-right">{item.requests24h.toLocaleString()}</td>
+                  <td className="px-4 py-4 text-sm text-gray-700 text-right">{item.avgResponseTimeMs}ms</td>
+                  <td className="px-4 py-4 text-sm text-gray-700 text-right">{item.p95Ms}ms</td>
+                  <td className="px-4 py-4 text-sm text-gray-700 text-right">{item.p99Ms}ms</td>
+                  <td className="px-4 py-4 text-sm text-gray-700 text-right">{item.errorRatePct}%</td>
+                  <td className="px-4 py-4 text-sm text-gray-700">{item.status}</td>
+                  <td className="px-4 py-4 text-sm text-gray-700 text-right">{item.uptimePct}%</td>
                 </tr>
               ))}
             </tbody>
@@ -184,14 +224,12 @@ export function APIMonitoring() {
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
           <h2 className="text-lg font-semibold text-gray-900">Request Volume Analytics</h2>
-          <p className="mt-1 text-sm text-gray-600">
-            Session, message, and search throughput grouped by activity trend buckets.
-          </p>
+          <p className="mt-1 text-sm text-gray-600">Request throughput grouped by monitoring window.</p>
           <div className="mt-6 h-80">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={data?.activityTrend ?? []}>
+              <AreaChart data={data?.requestVolume ?? []}>
                 <defs>
-                  <linearGradient id="apiSessionsGradient" x1="0" y1="0" x2="0" y2="1">
+                  <linearGradient id="apiReqGradient" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3} />
                     <stop offset="95%" stopColor="#3B82F6" stopOpacity={0} />
                   </linearGradient>
@@ -200,35 +238,24 @@ export function APIMonitoring() {
                 <XAxis dataKey="label" tickLine={false} axisLine={false} />
                 <YAxis tickLine={false} axisLine={false} />
                 <Tooltip />
-                <Legend />
-                <Area
-                  type="monotone"
-                  dataKey="sessions"
-                  stroke="#3B82F6"
-                  fill="url(#apiSessionsGradient)"
-                  name="Sessions"
-                />
-                <Line type="monotone" dataKey="messages" stroke="#8B5CF6" strokeWidth={2} name="Messages" />
-                <Line type="monotone" dataKey="searches" stroke="#10B981" strokeWidth={2} name="Searches" />
+                <Area type="monotone" dataKey="requests" stroke="#3B82F6" fill="url(#apiReqGradient)" />
               </AreaChart>
             </ResponsiveContainer>
           </div>
         </div>
 
         <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-gray-900">Search Load Distribution</h2>
-          <p className="mt-1 text-sm text-gray-600">
-            Distribution of how often sessions trigger search-heavy API behavior.
-          </p>
+          <h2 className="text-lg font-semibold text-gray-900">Error Rate Analytics</h2>
+          <p className="mt-1 text-sm text-gray-600">Error trend with spike visibility.</p>
           <div className="mt-6 h-80">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data?.searchDistribution ?? []}>
+              <LineChart data={data?.errorRateTrend ?? []}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="label" tickLine={false} axisLine={false} />
                 <YAxis tickLine={false} axisLine={false} />
                 <Tooltip />
-                <Bar dataKey="count" fill="#10B981" radius={[8, 8, 0, 0]} />
-              </BarChart>
+                <Line type="monotone" dataKey="rate" stroke="#EF4444" strokeWidth={3} />
+              </LineChart>
             </ResponsiveContainer>
           </div>
         </div>
@@ -236,31 +263,40 @@ export function APIMonitoring() {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm xl:col-span-2">
-          <h2 className="text-lg font-semibold text-gray-900">Message & Duration Diagnostics</h2>
-          <p className="mt-1 text-sm text-gray-600">
-            Current admin behavior analytics support message-volume and session-duration inspection,
-            but not true error logs or latency percentiles.
-          </p>
+          <h2 className="text-lg font-semibold text-gray-900">Requests per Provider</h2>
+          <p className="mt-1 text-sm text-gray-600">Provider-level request consumption.</p>
           <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
             <div className="h-72">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={data?.messageDistribution ?? []}>
+                <BarChart data={data?.providerUsage ?? []} layout="vertical">
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="label" tickLine={false} axisLine={false} angle={-12} textAnchor="end" height={60} />
-                  <YAxis tickLine={false} axisLine={false} />
+                  <XAxis type="number" tickLine={false} axisLine={false} />
+                  <YAxis type="category" dataKey="provider" tickLine={false} axisLine={false} width={96} />
                   <Tooltip />
-                  <Bar dataKey="count" fill="#8B5CF6" radius={[8, 8, 0, 0]} />
+                  <Bar dataKey="requests" radius={[0, 8, 8, 0]}>
+                    {(data?.providerUsage ?? []).map((row) => (
+                      <Cell key={row.provider} fill={row.color} />
+                    ))}
+                  </Bar>
                 </BarChart>
               </ResponsiveContainer>
             </div>
             <div className="h-72">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={data?.sessionDurationDistribution ?? []}>
+                <BarChart
+                  data={[
+                    { name: "Success", count: data?.successFailed.success ?? 0 },
+                    { name: "Failed", count: data?.successFailed.failed ?? 0 },
+                  ]}
+                >
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="label" tickLine={false} axisLine={false} angle={-12} textAnchor="end" height={60} />
+                  <XAxis dataKey="name" tickLine={false} axisLine={false} />
                   <YAxis tickLine={false} axisLine={false} />
                   <Tooltip />
-                  <Bar dataKey="count" fill="#F59E0B" radius={[8, 8, 0, 0]} />
+                  <Bar dataKey="count" radius={[8, 8, 0, 0]}>
+                    <Cell fill="#10B981" />
+                    <Cell fill="#EF4444" />
+                  </Bar>
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -270,25 +306,94 @@ export function APIMonitoring() {
         <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
           <div className="flex items-center gap-2">
             <AlertTriangle className="h-5 w-5 text-amber-600" />
-            <h2 className="text-lg font-semibold text-gray-900">Unsupported Telemetry</h2>
+            <h2 className="text-lg font-semibold text-gray-900">Active Alerts</h2>
           </div>
           <div className="mt-6 space-y-4">
-            <div className="rounded-lg border border-amber-100 bg-amber-50 p-4 text-sm text-amber-800">
-              No per-endpoint latency, p95/p99, or status-code history is currently stored.
-            </div>
-            <div className="rounded-lg border border-amber-100 bg-amber-50 p-4 text-sm text-amber-800">
-              API key inventory, quota usage, and real cost-per-provider management need dedicated
-              backend config tables and telemetry.
-            </div>
+            {(data?.activeAlerts ?? []).map((alert) => (
+              <div
+                key={alert.id}
+                className={`rounded-lg border p-4 text-sm ${
+                  alert.type === "error"
+                    ? "border-red-200 bg-red-50 text-red-800"
+                    : alert.type === "warning"
+                      ? "border-amber-200 bg-amber-50 text-amber-800"
+                      : "border-blue-200 bg-blue-50 text-blue-800"
+                }`}
+              >
+                <p className="font-medium">{alert.title}</p>
+                <p className="mt-1">{alert.message}</p>
+                <p className="mt-2 text-xs opacity-80">{alert.time}</p>
+              </div>
+            ))}
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-              <p className="text-sm font-medium text-gray-900">Observed workload totals</p>
+              <p className="text-sm font-medium text-gray-900">Observed totals</p>
               <p className="mt-2 text-sm text-gray-600">
-                {totals.sessions.toLocaleString()} sessions, {totals.messages.toLocaleString()} messages,
-                {" "}
-                and {totals.searches.toLocaleString()} searches in the current activity window.
+                {totals.requests.toLocaleString()} requests in current monitoring window.
               </p>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+        <h2 className="text-lg font-semibold text-gray-900">API Key Usage Records</h2>
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full min-w-[640px]">
+            <thead className="border-b border-gray-200 bg-gray-50 text-left text-sm text-gray-600">
+              <tr>
+                <th className="px-4 py-3 font-medium">Provider</th>
+                <th className="px-4 py-3 font-medium">Key Name</th>
+                <th className="px-4 py-3 font-medium">Status</th>
+                <th className="px-4 py-3 font-medium">Last Used</th>
+                <th className="px-4 py-3 font-medium text-right">Requests (24h)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(data?.apiKeys ?? []).map((row) => (
+                <tr key={row.keyName} className="border-b border-gray-100">
+                  <td className="px-4 py-3 text-sm text-gray-700">{row.provider}</td>
+                  <td className="px-4 py-3 text-sm font-medium text-gray-900">{row.keyName}</td>
+                  <td className="px-4 py-3 text-sm text-gray-700">{row.status}</td>
+                  <td className="px-4 py-3 text-sm text-gray-700">
+                    {row.lastUsed ? new Date(row.lastUsed).toLocaleString() : "Never"}
+                  </td>
+                  <td className="px-4 py-3 text-right text-sm text-gray-700">{row.requests24h.toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {(data?.apiKeys.length ?? 0) === 0 ? (
+            <p className="px-4 py-6 text-sm text-gray-500">No API key usage records collected yet.</p>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+        <h2 className="text-lg font-semibold text-gray-900">Recent Error Logs</h2>
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full min-w-[760px]">
+            <thead className="border-b border-gray-200 bg-gray-50 text-left text-sm text-gray-600">
+              <tr>
+                <th className="px-4 py-3 font-medium">Endpoint</th>
+                <th className="px-4 py-3 font-medium">Timestamp</th>
+                <th className="px-4 py-3 font-medium">Error</th>
+                <th className="px-4 py-3 font-medium text-right">Status Code</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(data?.errorLogs ?? []).map((row) => (
+                <tr key={row.id} className="border-b border-gray-100">
+                  <td className="px-4 py-3 text-xs font-mono text-gray-700">{row.endpoint}</td>
+                  <td className="px-4 py-3 text-sm text-gray-700">{row.timestamp}</td>
+                  <td className="px-4 py-3 text-sm text-gray-700">{row.error}</td>
+                  <td className="px-4 py-3 text-sm text-right font-semibold text-red-600">{row.statusCode}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {data?.errorLogs.length === 0 ? (
+            <p className="px-4 py-6 text-sm text-gray-500">No recent errors in current snapshot.</p>
+          ) : null}
         </div>
       </div>
     </div>

@@ -11,6 +11,7 @@ from models.stats import TravelStats, Achievement, UserAchievement
 from models.consent import ConsentRecord
 from models.feedback import Feedback
 from models.otp import SignupOTP
+from models.api_monitoring import ApiRequestLog
 
 __all__ = [
     "BaseUser",
@@ -30,4 +31,5 @@ __all__ = [
     "ConsentRecord",
     "Feedback",
     "SignupOTP",
+    "ApiRequestLog",
 ]

@@ -1,4 +1,5 @@
 import {
+  BackendAdminApiMonitoringResponse,
   BackendAdminAiPerformanceResponse,
   BackendAdminBehaviorResponse,
   BackendAdminFeedbackDetail,
@@ -219,6 +220,18 @@ export async function getAdminFeedbackSummaryV2() {
 export async function getAdminRetention() {
   return fetchAdminBackend<BackendAdminRetentionResponse>(
     "/api/admin/retention",
+  );
+}
+
+export async function getAdminApiMonitoring() {
+  return fetchAdminBackend<BackendAdminApiMonitoringResponse>(
+    "/api/admin/api-monitoring",
+  );
+}
+
+export async function getBackendHealth() {
+  return fetchAdminBackend<{ status?: string; version?: string; service?: string }>(
+    "/api/health",
   );
 }
 

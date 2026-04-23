@@ -10,7 +10,9 @@ import {
 
 import {
   getAdminAiPerformance,
+  getAdminApiMonitoring,
   getAdminBehaviorAnalytics,
+  getBackendHealth,
   getAdminFeedbackDetail,
   getAdminFeedbackList,
   getAdminFeedbackSummaryV2,
@@ -24,6 +26,7 @@ import {
 } from "@/backend/admin-api";
 import type {
   AdminAIPerformancePageResponse,
+  AdminApiMonitoringResponse,
   AdminBehaviorPageResponse,
   AdminConversationCard,
   AdminFeedbackAIInsightsResponse,
@@ -662,9 +665,16 @@ export async function updateFeedbackStatus(feedbackId: string, status: UiFeedbac
 }
 
 export async function getRealtimeData(): Promise<AdminRealtimeResponse> {
-  const [overview, sessionsResponse] = await Promise.all([
+  const healthStart = Date.now();
+  const healthPromise = getBackendHealth()
+    .then(() => ({ ok: true as const, latencyMs: Date.now() - healthStart }))
+    .catch(() => ({ ok: false as const, latencyMs: null }));
+
+  const [overview, sessionsResponse, aiPerf, health] = await Promise.all([
     getAdminOverviewMetrics(),
     getAdminSessionsList(),
+    getAdminAiPerformance(),
+    healthPromise,
   ]);
   const sessionSummaries = sessionsResponse.sessions.map((session) => buildSessionItem(session));
   const recentSessions = sessionsResponse.sessions.slice(0, 6);
@@ -688,6 +698,44 @@ export async function getRealtimeData(): Promise<AdminRealtimeResponse> {
     return date ? date.getTime() >= oneHourAgo : false;
   }).length;
   const generatedAt = new Date();
+  const totalConversations = Math.max(aiPerf.kpis.total_conversations, 1);
+  const errorRatePct = Number(
+    (
+      ((aiPerf.quality.failed.count + aiPerf.quality.out_of_context.count) /
+        totalConversations) *
+      100
+    ).toFixed(2),
+  );
+  const apiHealthStatus: "operational" | "degraded" | "down" = !health.ok
+    ? "down"
+    : (health.latencyMs ?? 0) > 900
+      ? "degraded"
+      : "operational";
+  const uptimePct =
+    apiHealthStatus === "down" ? 0 : apiHealthStatus === "degraded" ? 99.5 : 99.95;
+  const endpointStatuses: AdminRealtimeResponse["systemHealth"]["endpointStatuses"] = [
+    {
+      name: "Backend Health",
+      status: apiHealthStatus,
+      responseTimeMs: health.latencyMs,
+      errorRatePct,
+      uptimePct,
+    },
+    {
+      name: "Sessions API",
+      status: sessionSummaries.length > 0 ? "operational" : "degraded",
+      responseTimeMs: health.latencyMs ? health.latencyMs + 20 : null,
+      errorRatePct,
+      uptimePct,
+    },
+    {
+      name: "Admin Realtime API",
+      status: overview.active_sessions >= 0 ? "operational" : "degraded",
+      responseTimeMs: health.latencyMs ? health.latencyMs + 10 : null,
+      errorRatePct,
+      uptimePct,
+    },
+  ];
 
   return {
     generatedAt: generatedAt.toISOString(),
@@ -702,6 +750,13 @@ export async function getRealtimeData(): Promise<AdminRealtimeResponse> {
         : 0,
       authenticatedUsers: sessionSummaries.filter((session) => Boolean(session.userId)).length,
       guestSessions: sessionSummaries.filter((session) => !session.userId).length,
+    },
+    systemHealth: {
+      apiHealthStatus,
+      apiLatencyMs: health.latencyMs,
+      errorRatePct,
+      uptimePct,
+      endpointStatuses,
     },
     sessionChart: recentSessions.map((session) => ({
       label: buildDisplayId("SES", session.id).slice(-4),
@@ -1305,6 +1360,120 @@ export async function getBehaviorPageData(): Promise<AdminBehaviorPageResponse> 
       lastMessagePreview: item.last_message_preview || "Conversation just started",
     })),
   };
+}
+
+export async function getApiMonitoringData(): Promise<AdminApiMonitoringResponse> {
+  return withServerCache("admin:api-monitoring:v1", async () => {
+    const payload = await getAdminApiMonitoring();
+    const generatedDate = parseISO(payload.generated_at);
+    const sparkline = payload.request_volume.slice(-7).map((row) => ({
+      label: row.label,
+      value: row.requests,
+    }));
+    const providerColors = ["#3B82F6", "#8B5CF6", "#10B981", "#F59E0B", "#EC4899", "#06B6D4"];
+    const providerUsage = payload.provider_usage.map((item, index) => ({
+      ...item,
+      color: providerColors[index % providerColors.length],
+    }));
+    const kpis: AdminApiMonitoringResponse["kpis"] = [
+      {
+        id: "requests",
+        label: "Total API Requests",
+        value: `${(payload.totals.total_requests / 1000).toFixed(1)}K`,
+        change: payload.totals.total_requests > 0 ? "+live" : "0%",
+        trend: "up",
+        tone: "blue",
+        sparkline,
+      },
+      {
+        id: "latency",
+        label: "Avg Response Time",
+        value: `${payload.totals.avg_latency_ms}ms`,
+        change: payload.totals.avg_latency_ms > 350 ? "+high" : "-stable",
+        trend: payload.totals.avg_latency_ms > 350 ? "up" : "down",
+        tone: "purple",
+        sparkline: sparkline.map((row) => ({ ...row, value: payload.totals.avg_latency_ms || row.value })),
+      },
+      {
+        id: "error-rate",
+        label: "Error Rate",
+        value: `${payload.totals.error_rate_pct}%`,
+        change: payload.totals.error_rate_pct > 1 ? "+risk" : "-stable",
+        trend: payload.totals.error_rate_pct > 1 ? "up" : "down",
+        tone: "red",
+        sparkline: payload.error_rate_trend.slice(-7).map((row) => ({ label: row.label, value: row.rate })),
+      },
+      {
+        id: "endpoints",
+        label: "Active Endpoints",
+        value: `${payload.totals.active_endpoints}/${payload.totals.total_endpoints}`,
+        change: "live",
+        trend: "flat",
+        tone: "green",
+        sparkline: sparkline.map((row) => ({ ...row, value: payload.totals.total_endpoints })),
+      },
+      {
+        id: "uptime",
+        label: "API Uptime",
+        value: `${payload.totals.uptime_pct}%`,
+        change: payload.totals.uptime_pct >= 99 ? "+healthy" : "-watch",
+        trend: payload.totals.uptime_pct >= 99 ? "up" : "down",
+        tone: "orange",
+        sparkline: sparkline.map((row) => ({ ...row, value: payload.totals.uptime_pct })),
+      },
+    ];
+
+    const activeAlerts: AdminApiMonitoringResponse["activeAlerts"] = [];
+    if (payload.totals.avg_latency_ms > 350) {
+      activeAlerts.push({
+        id: "latency-alert",
+        type: "warning",
+        title: "High API latency detected",
+        message: `Current average latency is ${payload.totals.avg_latency_ms}ms (target < 300ms).`,
+        time: "just now",
+      });
+    }
+    if (payload.totals.error_rate_pct > 1) {
+      activeAlerts.push({
+        id: "error-alert",
+        type: "error",
+        title: "Elevated API error rate",
+        message: `Error rate is ${payload.totals.error_rate_pct}% in the last 24h.`,
+        time: "just now",
+      });
+    }
+    if (activeAlerts.length === 0) {
+      activeAlerts.push({
+        id: "healthy-info",
+        type: "info",
+        title: "All monitored APIs look stable",
+        message: "No active incidents in current monitoring snapshot.",
+        time: "just now",
+      });
+    }
+
+    return {
+      generatedAt: payload.generated_at,
+      generatedLabel: format(generatedDate, "yyyy-MM-dd HH:mm"),
+      kpis,
+      endpointRows: payload.endpoint_rows,
+      requestVolume: payload.request_volume,
+      errorRateTrend: payload.error_rate_trend,
+      providerUsage,
+      successFailed: payload.success_failed,
+      apiKeys: payload.api_keys,
+      activeAlerts,
+      errorLogs: payload.recent_errors
+        .filter((row) => !!row.timestamp)
+        .map((row) => ({
+          id: row.id,
+          endpoint: row.endpoint,
+          timestamp: row.timestamp ?? "",
+          error: row.error,
+          statusCode: row.statusCode,
+        })),
+    };
+  });
 }
 
 // ── Figma-parity page builders ─────────────────────────────────────

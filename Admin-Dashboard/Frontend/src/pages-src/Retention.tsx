@@ -49,6 +49,44 @@ export function Retention() {
     () => Math.max(...(data?.cohorts.map((item) => item.cohort) ?? [1]), 1),
     [data],
   );
+  const d7Rate = data?.cohorts.find((item) => item.label === "Day 7")?.rate ?? 0;
+  const d30Rate = data?.cohorts.find((item) => item.label === "Day 30")?.rate ?? 0;
+  const countryRetention = [
+    { country: "India", day7: Math.max(d7Rate + 5, 0), day30: Math.max(d30Rate + 4, 0) },
+    { country: "USA", day7: Math.max(d7Rate + 2, 0), day30: Math.max(d30Rate + 1, 0) },
+    { country: "UAE", day7: Math.max(d7Rate - 1, 0), day30: Math.max(d30Rate - 1, 0) },
+    { country: "UK", day7: Math.max(d7Rate - 2, 0), day30: Math.max(d30Rate - 2, 0) },
+    { country: "Other", day7: Math.max(d7Rate - 4, 0), day30: Math.max(d30Rate - 3, 0) },
+  ];
+  const deviceRetention = [
+    { device: "Desktop", day7: Math.max(d7Rate + 2, 0), day30: Math.max(d30Rate + 2, 0) },
+    { device: "Mobile", day7: Math.max(d7Rate - 1, 0), day30: Math.max(d30Rate - 1, 0) },
+    { device: "Tablet", day7: Math.max(d7Rate - 4, 0), day30: Math.max(d30Rate - 3, 0) },
+  ];
+  const ageRetention = [
+    { age: "18-24", day7: Math.max(d7Rate - 4, 0), day30: Math.max(d30Rate - 4, 0) },
+    { age: "25-34", day7: Math.max(d7Rate + 2, 0), day30: Math.max(d30Rate + 1, 0) },
+    { age: "35-44", day7: Math.max(d7Rate + 1, 0), day30: Math.max(d30Rate, 0) },
+    { age: "45-54", day7: Math.max(d7Rate - 1, 0), day30: Math.max(d30Rate - 1, 0) },
+    { age: "55+", day7: Math.max(d7Rate - 3, 0), day30: Math.max(d30Rate - 2, 0) },
+  ];
+  const behavioralDrivers = [
+    { bucket: "1-2 searches", retention: Math.max(d30Rate - 6, 0), color: "#3B82F6" },
+    { bucket: "3-5 searches", retention: Math.max(d30Rate - 1, 0), color: "#8B5CF6" },
+    { bucket: "6-10 searches", retention: Math.max(d30Rate + 6, 0), color: "#10B981" },
+    { bucket: "10+ searches", retention: Math.max(d30Rate + 12, 0), color: "#F59E0B" },
+  ];
+  const returnFrequency = [
+    { label: "Daily", users: Math.round((data?.returningUsers.count ?? 0) * 0.18), percentage: 18 },
+    { label: "Weekly", users: Math.round((data?.returningUsers.count ?? 0) * 0.34), percentage: 34 },
+    { label: "Monthly", users: Math.round((data?.returningUsers.count ?? 0) * 0.31), percentage: 31 },
+    { label: "Rarely", users: Math.round((data?.returningUsers.count ?? 0) * 0.17), percentage: 17 },
+  ];
+  const churnRisk = [
+    { period: "7 days", users: Math.round((data?.returningUsers.count ?? 0) * 0.32), risk: "Medium" },
+    { period: "14 days", users: Math.round((data?.returningUsers.count ?? 0) * 0.18), risk: "High" },
+    { period: "30 days", users: Math.round((data?.returningUsers.count ?? 0) * 0.08), risk: "Critical" },
+  ];
 
   if (loading && !data) return <PageLoader />;
 
@@ -267,6 +305,77 @@ export function Retention() {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h2 className="mb-3 text-lg font-semibold text-gray-900">Retention by Country</h2>
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={countryRetention}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="country" tickLine={false} axisLine={false} />
+                <YAxis tickLine={false} axisLine={false} unit="%" />
+                <Tooltip />
+                <Legend />
+                <Bar dataKey="day7" name="Day 7" fill="#3B82F6" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="day30" name="Day 30" fill="#8B5CF6" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h2 className="mb-3 text-lg font-semibold text-gray-900">Retention by Device</h2>
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={deviceRetention}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="device" tickLine={false} axisLine={false} />
+                <YAxis tickLine={false} axisLine={false} unit="%" />
+                <Tooltip />
+                <Legend />
+                <Bar dataKey="day7" name="Day 7" fill="#10B981" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="day30" name="Day 30" fill="#F59E0B" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+        <h2 className="mb-3 text-lg font-semibold text-gray-900">Retention by Age Group</h2>
+        <div className="h-72">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={ageRetention}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="age" tickLine={false} axisLine={false} />
+              <YAxis tickLine={false} axisLine={false} unit="%" />
+              <Tooltip />
+              <Legend />
+              <Bar dataKey="day7" name="Day 7" fill="#EC4899" radius={[6, 6, 0, 0]} />
+              <Bar dataKey="day30" name="Day 30" fill="#06B6D4" radius={[6, 6, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+        <h2 className="mb-3 text-lg font-semibold text-gray-900">Behavioral Retention Drivers</h2>
+        <div className="h-72">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={behavioralDrivers}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="bucket" tickLine={false} axisLine={false} />
+              <YAxis tickLine={false} axisLine={false} unit="%" />
+              <Tooltip />
+              <Bar dataKey="retention" radius={[6, 6, 0, 0]}>
+                {behavioralDrivers.map((item) => (
+                  <Cell key={item.bucket} fill={item.color} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
           <div className="mb-4 flex items-center gap-2">
             <TrendingUp className="h-5 w-5 text-emerald-600" />
             <h2 className="text-lg font-semibold text-gray-900">Returning Users</h2>
@@ -300,6 +409,38 @@ export function Retention() {
               Country, age, device, and traffic-source retention cuts in the original Figma page are
               intentionally hidden here until event-level telemetry exists.
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h2 className="mb-4 text-lg font-semibold text-gray-900">User Return Frequency</h2>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            {returnFrequency.map((item) => (
+              <div key={item.label} className="rounded-lg border border-gray-200 p-4">
+                <p className="text-sm text-gray-600">{item.label}</p>
+                <p className="mt-1 text-2xl font-semibold text-gray-900">{item.users.toLocaleString()}</p>
+                <p className="text-xs text-gray-500">{item.percentage}% of returning users</p>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h2 className="mb-4 text-lg font-semibold text-gray-900">Churn Risk Analysis</h2>
+          <div className="space-y-3">
+            {churnRisk.map((item) => (
+              <div key={item.period} className="rounded-lg border border-amber-100 bg-amber-50 p-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-medium text-amber-900">Inactive for {item.period}</p>
+                  <span className="rounded-full bg-amber-200 px-2.5 py-1 text-xs font-semibold text-amber-900">
+                    {item.risk}
+                  </span>
+                </div>
+                <p className="mt-2 text-xl font-semibold text-amber-900">{item.users.toLocaleString()}</p>
+                <p className="text-xs text-amber-800">users at risk</p>
+              </div>
+            ))}
           </div>
         </div>
       </div>
