@@ -664,20 +664,26 @@ export async function updateFeedbackStatus(feedbackId: string, status: UiFeedbac
   return getFeedbackDetailData(feedbackId);
 }
 
-export async function getRealtimeData(): Promise<AdminRealtimeResponse> {
+export async function getRealtimeData(rangeDays = 7): Promise<AdminRealtimeResponse> {
   const healthStart = Date.now();
   const healthPromise = getBackendHealth()
     .then(() => ({ ok: true as const, latencyMs: Date.now() - healthStart }))
     .catch(() => ({ ok: false as const, latencyMs: null }));
 
-  const [overview, sessionsResponse, aiPerf, health] = await Promise.all([
-    getAdminOverviewMetrics(),
+  const [overview, sessionsResponse, aiPerf, usersAnalytics, health] = await Promise.all([
+    getAdminOverviewMetrics(rangeDays),
     getAdminSessionsList(),
-    getAdminAiPerformance(),
+    getAdminAiPerformance(rangeDays),
+    getAdminUsersAnalytics(rangeDays),
     healthPromise,
   ]);
+  const userNameById = new Map<string, string>();
+  for (const user of usersAnalytics.users) {
+    userNameById.set(user.id, user.name || user.email || `User ${user.id.slice(0, 8)}`);
+  }
   const sessionSummaries = sessionsResponse.sessions.map((session) => buildSessionItem(session));
-  const recentSessions = sessionsResponse.sessions.slice(0, 6);
+  // Pull a broader live window so the realtime page can surface more concurrent chats.
+  const recentSessions = sessionsResponse.sessions.slice(0, 20);
   const sessionDetails = (
     await Promise.all(
       recentSessions.map(async (session) => {
@@ -690,7 +696,16 @@ export async function getRealtimeData(): Promise<AdminRealtimeResponse> {
     )
   ).filter((detail): detail is BackendAdminSessionDetail => Boolean(detail));
 
-  const activeChats = sessionDetails.map(buildConversationCard);
+  const activeChats = sessionDetails.map((detail) => {
+    const card = buildConversationCard(detail);
+    if (card.userId) {
+      const resolvedName = userNameById.get(card.userId);
+      if (resolvedName) {
+        card.userLabel = resolvedName;
+      }
+    }
+    return card;
+  });
   const messages = sessionDetails.flatMap((detail) => detail.messages);
   const oneHourAgo = addDays(new Date(), 0).getTime() - 60 * 60 * 1000;
   const messagesLastHour = messages.filter((message) => {
@@ -758,14 +773,17 @@ export async function getRealtimeData(): Promise<AdminRealtimeResponse> {
       uptimePct,
       endpointStatuses,
     },
-    sessionChart: recentSessions.map((session) => ({
+    sessionChart: recentSessions.slice(0, 12).map((session) => ({
       label: buildDisplayId("SES", session.id).slice(-4),
       messages: session.message_count,
     })),
     activityFeed: sessionSummaries.slice(0, 8).map((session) => ({
       id: session.id,
       action: inferActivityAction(session.lastMessagePreview),
-      userLabel: session.userLabel,
+      userLabel:
+        session.userId && userNameById.get(session.userId)
+          ? (userNameById.get(session.userId) as string)
+          : session.userLabel,
       relativeTime: session.relativeUpdated,
       status: session.status,
     })),
@@ -790,10 +808,10 @@ function seriesDeltaPct(series: number[]): { change: string; trend: "up" | "down
   };
 }
 
-export async function getUsersPageData(): Promise<AdminUsersPageResponse> {
+export async function getUsersPageData(rangeDays = 7): Promise<AdminUsersPageResponse> {
   const [analytics, behavior] = await Promise.all([
-    getAdminUsersAnalytics(),
-    getAdminBehaviorAnalytics(),
+    getAdminUsersAnalytics(rangeDays),
+    getAdminBehaviorAnalytics(rangeDays),
   ]);
   const generatedAt = analytics.generated_at;
   const g = analytics.growth_7d;
@@ -1000,10 +1018,10 @@ export async function getUsersPageData(): Promise<AdminUsersPageResponse> {
   };
 }
 
-export async function getGrowthPageData(): Promise<AdminGrowthPageResponse> {
+export async function getGrowthPageData(rangeDays = 7): Promise<AdminGrowthPageResponse> {
   const [analytics, funnel] = await Promise.all([
-    getAdminUsersAnalytics(),
-    getAdminFunnelAnalytics(),
+    getAdminUsersAnalytics(rangeDays),
+    getAdminFunnelAnalytics(rangeDays),
   ]);
   const generatedAt = analytics.generated_at;
 
@@ -1088,12 +1106,12 @@ export async function getGrowthPageData(): Promise<AdminGrowthPageResponse> {
   };
 }
 
-export async function getRetentionPageData(): Promise<AdminRetentionPageResponse> {
-  return withServerCache("admin:retention:v1", async () => {
+export async function getRetentionPageData(rangeDays = 7): Promise<AdminRetentionPageResponse> {
+  return withServerCache(`admin:retention:v1:${rangeDays}`, async () => {
     const [retention, analytics, behavior] = await Promise.all([
-      getAdminRetention(),
-      getAdminUsersAnalytics(),
-      getAdminBehaviorAnalytics(),
+      getAdminRetention(rangeDays),
+      getAdminUsersAnalytics(rangeDays),
+      getAdminBehaviorAnalytics(rangeDays),
     ]);
 
     const generatedDate = new Date();
@@ -1212,8 +1230,8 @@ export async function getRetentionPageData(): Promise<AdminRetentionPageResponse
   });
 }
 
-export async function getFunnelPageData(): Promise<AdminFunnelPageResponse> {
-  const funnel = await getAdminFunnelAnalytics();
+export async function getFunnelPageData(rangeDays = 7): Promise<AdminFunnelPageResponse> {
+  const funnel = await getAdminFunnelAnalytics(rangeDays);
   const generatedAt = funnel.generated_at;
 
   return {
@@ -1278,9 +1296,14 @@ export async function getFunnelPageData(): Promise<AdminFunnelPageResponse> {
   };
 }
 
-export async function getBehaviorPageData(): Promise<AdminBehaviorPageResponse> {
-  const behavior: BackendAdminBehaviorResponse = await getAdminBehaviorAnalytics();
+export async function getBehaviorPageData(rangeDays = 7): Promise<AdminBehaviorPageResponse> {
+  const [behavior, usersAnalytics]: [BackendAdminBehaviorResponse, BackendAdminUsersResponse] =
+    await Promise.all([getAdminBehaviorAnalytics(rangeDays), getAdminUsersAnalytics(rangeDays)]);
   const generatedAt = behavior.generated_at;
+  const userNameById = new Map<string, string>();
+  for (const user of usersAnalytics.users) {
+    userNameById.set(user.id, user.name || user.email || `User ${user.id.slice(0, 8)}`);
+  }
 
   return {
     generatedAt,
@@ -1352,7 +1375,9 @@ export async function getBehaviorPageData(): Promise<AdminBehaviorPageResponse> 
     recentActivity: behavior.recent_activity.map((item) => ({
       id: item.session_id,
       displayId: buildDisplayId("SES", item.session_id),
-      userLabel: item.user_id ? `User ${item.user_id.slice(0, 8)}` : "Guest session",
+      userLabel: item.user_id
+        ? (userNameById.get(item.user_id) ?? `User ${item.user_id.slice(0, 8)}`)
+        : "Guest session",
       updatedLabel: formatRelativeTime(item.updated_at),
       messageCount: item.message_count,
       searchCount: item.search_count,
@@ -1362,9 +1387,9 @@ export async function getBehaviorPageData(): Promise<AdminBehaviorPageResponse> 
   };
 }
 
-export async function getApiMonitoringData(): Promise<AdminApiMonitoringResponse> {
-  return withServerCache("admin:api-monitoring:v1", async () => {
-    const payload = await getAdminApiMonitoring();
+export async function getApiMonitoringData(rangeDays = 7): Promise<AdminApiMonitoringResponse> {
+  return withServerCache(`admin:api-monitoring:v1:${rangeDays}`, async () => {
+    const payload = await getAdminApiMonitoring(rangeDays);
     const generatedDate = parseISO(payload.generated_at);
     const sparkline = payload.request_volume.slice(-7).map((row) => ({
       label: row.label,
@@ -1461,7 +1486,20 @@ export async function getApiMonitoringData(): Promise<AdminApiMonitoringResponse
       errorRateTrend: payload.error_rate_trend,
       providerUsage,
       successFailed: payload.success_failed,
-      apiKeys: payload.api_keys,
+      apiKeys: payload.api_keys.map((row) => ({
+        ...row,
+        remainingToday:
+          row.quotaDaily && row.quotaDaily > 0
+            ? Math.max(row.quotaDaily - row.requests24h, 0)
+            : 0,
+      })),
+      rateLimits: payload.rate_limits,
+      costMonitoring: {
+        currency: payload.cost_monitoring.currency,
+        totalMonthlyCost: payload.cost_monitoring.total_monthly_cost,
+        avgCostPerRequest: payload.cost_monitoring.avg_cost_per_request,
+        monthlyBreakdown: payload.cost_monitoring.monthly_breakdown,
+      },
       activeAlerts,
       errorLogs: payload.recent_errors
         .filter((row) => !!row.timestamp)
@@ -1539,13 +1577,13 @@ function safeFixed(value: number, digits = 1): string {
   return Number.isFinite(value) ? value.toFixed(digits) : "0";
 }
 
-export async function getOverviewV2Data(): Promise<AdminOverviewPageResponse> {
-  return withServerCache("admin:overview:v2", async () => {
+export async function getOverviewV2Data(rangeDays = 7): Promise<AdminOverviewPageResponse> {
+  return withServerCache(`admin:overview:v2:${rangeDays}`, async () => {
     const [analytics, overview, retention, funnel] = await Promise.all([
-      getAdminUsersAnalytics(),
-      getAdminOverviewMetrics(),
-      getAdminRetention(),
-      getAdminFunnelAnalytics(),
+      getAdminUsersAnalytics(rangeDays),
+      getAdminOverviewMetrics(rangeDays),
+      getAdminRetention(rangeDays),
+      getAdminFunnelAnalytics(rangeDays),
     ]);
 
   const generatedDate = new Date();
@@ -1975,13 +2013,13 @@ function formatAvgTime(seconds: number): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
-export async function getFunnelV2Data(): Promise<AdminFunnelPageV2Response> {
-  return withServerCache("admin:funnel:v2", async () => {
+export async function getFunnelV2Data(rangeDays = 7): Promise<AdminFunnelPageV2Response> {
+  return withServerCache(`admin:funnel:v2:${rangeDays}`, async () => {
     const [funnel, analytics, retention, behavior] = await Promise.all([
-      getAdminFunnelAnalytics(),
-      getAdminUsersAnalytics(),
-      getAdminRetention(),
-      getAdminBehaviorAnalytics(),
+      getAdminFunnelAnalytics(rangeDays),
+      getAdminUsersAnalytics(rangeDays),
+      getAdminRetention(rangeDays),
+      getAdminBehaviorAnalytics(rangeDays),
     ]);
 
   const generatedDate = new Date();
@@ -2305,8 +2343,8 @@ function severityFromLabel(label: string): "critical" | "high" | "medium" | "low
   return "medium";
 }
 
-export async function getAIPerformancePageData(): Promise<AdminAIPerformancePageResponse> {
-  const ai = await getAdminAiPerformance();
+export async function getAIPerformancePageData(rangeDays = 7): Promise<AdminAIPerformancePageResponse> {
+  const ai = await getAdminAiPerformance(rangeDays);
   const generatedDate = new Date();
 
   const avgResponseLabel =

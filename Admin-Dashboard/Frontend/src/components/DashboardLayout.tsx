@@ -65,7 +65,7 @@ const menuItems = [
     { path: "/settings", label: "Settings", icon: SettingsIcon },
 ];
 
-const dateRanges = ["Today", "7 Days", "30 Days", "Custom"];
+const dateRanges = ["7 Days", "15 Days", "30 Days"];
 
 interface DashboardLayoutProps {
     children: React.ReactNode;
@@ -233,6 +233,18 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
                                     ))}
                                 </select>
                             </div>
+
+                            {/* Notifications */}
+                            <a
+                                href="https://analytics.google.com/"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="hidden sm:inline-flex items-center gap-2 px-3 py-2 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors"
+                                title="Open Google Analytics 4"
+                            >
+                                <ExternalLink className="w-4 h-4" />
+                                GA4
+                            </a>
 
                             {/* Notifications */}
                             <button className="relative p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors">

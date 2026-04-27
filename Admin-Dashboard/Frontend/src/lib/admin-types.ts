@@ -620,6 +620,7 @@ export type BackendAdminRetentionResponse = {
 
 export type BackendAdminApiMonitoringResponse = {
   generated_at: string;
+  window?: string;
   totals: {
     total_requests: number;
     avg_latency_ms: number;
@@ -652,7 +653,27 @@ export type BackendAdminApiMonitoringResponse = {
     lastUsed: string | null;
     keyLast4?: string | null;
     requests24h: number;
+    quotaDaily?: number;
+    costPerRequest?: number;
+    currency?: string;
   }>;
+  rate_limits: Array<{
+    provider: string;
+    used: number;
+    quota: number;
+    percentUsed: number;
+  }>;
+  cost_monitoring: {
+    currency: string;
+    total_monthly_cost: number;
+    avg_cost_per_request: number;
+    monthly_breakdown: Array<{
+      provider: string;
+      requests: number;
+      costPerRequest: number;
+      monthlyCost: number;
+    }>;
+  };
   recent_errors: Array<{
     id: string;
     endpoint: string;
@@ -1079,7 +1100,28 @@ export type AdminApiMonitoringResponse = {
     lastUsed: string | null;
     keyLast4?: string | null;
     requests24h: number;
+    quotaDaily?: number;
+    remainingToday?: number;
+    costPerRequest?: number;
+    currency?: string;
   }>;
+  rateLimits: Array<{
+    provider: string;
+    used: number;
+    quota: number;
+    percentUsed: number;
+  }>;
+  costMonitoring: {
+    currency: string;
+    totalMonthlyCost: number;
+    avgCostPerRequest: number;
+    monthlyBreakdown: Array<{
+      provider: string;
+      requests: number;
+      costPerRequest: number;
+      monthlyCost: number;
+    }>;
+  };
   activeAlerts: Array<{
     id: string;
     type: "warning" | "error" | "info";

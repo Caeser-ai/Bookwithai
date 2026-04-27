@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
   AlertCircle,
@@ -40,12 +40,19 @@ const toneMap = {
 };
 
 export function APIMonitoring() {
+  const [dateRange, setDateRange] = useState("7d");
   const { data, loading, error, refresh } = useAdminData<AdminApiMonitoringResponse>(
-    "/api/admin/api-monitoring",
+    `/api/admin/api-monitoring?range=${dateRange}`,
   );
-  const [dateRange, setDateRange] = useState("24h");
   const [providerFilter, setProviderFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void refresh();
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, [refresh]);
 
   const totals = useMemo(() => {
     const trend = data?.requestVolume ?? [];
@@ -77,7 +84,7 @@ export function APIMonitoring() {
           </p>
         </div>
         <button
-          onClick={() => void refresh()}
+          onClick={() => window.location.reload()}
           className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
         >
           <RefreshCw className="h-4 w-4" />
@@ -94,8 +101,8 @@ export function APIMonitoring() {
               onChange={(event) => setDateRange(event.target.value)}
               className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700"
             >
-              <option value="24h">Last 24 hours</option>
               <option value="7d">Last 7 days</option>
+              <option value="15d">Last 15 days</option>
               <option value="30d">Last 30 days</option>
             </select>
           </div>
@@ -343,9 +350,11 @@ export function APIMonitoring() {
               <tr>
                 <th className="px-4 py-3 font-medium">Provider</th>
                 <th className="px-4 py-3 font-medium">Key Name</th>
+                <th className="px-4 py-3 font-medium">Token</th>
                 <th className="px-4 py-3 font-medium">Status</th>
                 <th className="px-4 py-3 font-medium">Last Used</th>
                 <th className="px-4 py-3 font-medium text-right">Requests (24h)</th>
+                <th className="px-4 py-3 font-medium text-right">Used / Left</th>
               </tr>
             </thead>
             <tbody>
@@ -353,11 +362,19 @@ export function APIMonitoring() {
                 <tr key={row.keyName} className="border-b border-gray-100">
                   <td className="px-4 py-3 text-sm text-gray-700">{row.provider}</td>
                   <td className="px-4 py-3 text-sm font-medium text-gray-900">{row.keyName}</td>
+                  <td className="px-4 py-3 text-sm text-gray-700">
+                    {row.keyLast4 ? `****${row.keyLast4}` : "N/A"}
+                  </td>
                   <td className="px-4 py-3 text-sm text-gray-700">{row.status}</td>
                   <td className="px-4 py-3 text-sm text-gray-700">
                     {row.lastUsed ? new Date(row.lastUsed).toLocaleString() : "Never"}
                   </td>
                   <td className="px-4 py-3 text-right text-sm text-gray-700">{row.requests24h.toLocaleString()}</td>
+                  <td className="px-4 py-3 text-right text-sm text-gray-700">
+                    {row.quotaDaily && row.quotaDaily > 0
+                      ? `${row.requests24h.toLocaleString()} / ${(row.remainingToday ?? 0).toLocaleString()}`
+                      : "N/A"}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -365,6 +382,81 @@ export function APIMonitoring() {
           {(data?.apiKeys.length ?? 0) === 0 ? (
             <p className="px-4 py-6 text-sm text-gray-500">No API key usage records collected yet.</p>
           ) : null}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-semibold text-gray-900">Rate Limit Monitoring</h2>
+          <div className="mt-4 space-y-4">
+            {(data?.rateLimits ?? []).map((row) => (
+              <div key={row.provider}>
+                <div className="mb-1 flex items-center justify-between text-sm">
+                  <span className="font-medium text-gray-900">{row.provider}</span>
+                  <span className="text-gray-600">
+                    {row.used.toLocaleString()} / {row.quota.toLocaleString()} ({row.percentUsed.toFixed(1)}%)
+                  </span>
+                </div>
+                <div className="h-2 rounded-full bg-gray-100">
+                  <div
+                    className={`h-2 rounded-full ${
+                      row.percentUsed > 90
+                        ? "bg-red-500"
+                        : row.percentUsed > 70
+                          ? "bg-amber-500"
+                          : "bg-emerald-500"
+                    }`}
+                    style={{ width: `${Math.min(row.percentUsed, 100)}%` }}
+                  />
+                </div>
+              </div>
+            ))}
+            {(data?.rateLimits.length ?? 0) === 0 ? (
+              <p className="text-sm text-gray-500">No rate-limit usage yet.</p>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-semibold text-gray-900">Cost Monitoring</h2>
+          <div className="mt-2 text-sm text-gray-600">
+            Total Monthly Cost:{" "}
+            <span className="font-semibold text-gray-900">
+              {data?.costMonitoring.currency} {data?.costMonitoring.totalMonthlyCost.toFixed(2)}
+            </span>
+          </div>
+          <div className="mt-1 text-sm text-gray-600">
+            Avg Cost / Request:{" "}
+            <span className="font-semibold text-gray-900">
+              {data?.costMonitoring.currency} {data?.costMonitoring.avgCostPerRequest.toFixed(6)}
+            </span>
+          </div>
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[520px]">
+              <thead className="border-b border-gray-200 bg-gray-50 text-left text-sm text-gray-600">
+                <tr>
+                  <th className="px-4 py-3 font-medium">Provider</th>
+                  <th className="px-4 py-3 font-medium text-right">Requests</th>
+                  <th className="px-4 py-3 font-medium text-right">Cost/Req</th>
+                  <th className="px-4 py-3 font-medium text-right">Monthly</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(data?.costMonitoring.monthlyBreakdown ?? []).map((row) => (
+                  <tr key={row.provider} className="border-b border-gray-100">
+                    <td className="px-4 py-3 text-sm text-gray-900">{row.provider}</td>
+                    <td className="px-4 py-3 text-right text-sm text-gray-700">{row.requests.toLocaleString()}</td>
+                    <td className="px-4 py-3 text-right text-sm text-gray-700">
+                      {data?.costMonitoring.currency} {row.costPerRequest.toFixed(6)}
+                    </td>
+                    <td className="px-4 py-3 text-right text-sm font-semibold text-gray-900">
+                      {data?.costMonitoring.currency} {row.monthlyCost.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 

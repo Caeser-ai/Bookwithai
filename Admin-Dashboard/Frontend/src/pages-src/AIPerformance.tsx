@@ -105,7 +105,7 @@ export function AIPerformance() {
             Last updated: {data?.generatedLabel ?? "—"}
           </div>
           <button
-            onClick={() => void refresh()}
+            onClick={() => window.location.reload()}
             className="inline-flex items-center gap-2 rounded-lg bg-purple-600 px-3 py-2 text-xs font-medium text-white hover:bg-purple-700"
           >
             <RefreshCw className="h-3.5 w-3.5" />

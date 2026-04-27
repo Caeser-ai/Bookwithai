@@ -137,7 +137,7 @@ export function FeedbackDashboard() {
             Last updated: {data?.generatedLabel ?? "Unavailable"}
           </div>
           <button
-            onClick={() => void refresh()}
+            onClick={() => window.location.reload()}
             className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
           >
             <RefreshCw className="h-4 w-4" />

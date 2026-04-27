@@ -85,8 +85,9 @@ function TrendMini({
 }
 
 export function Users() {
-  const { data, loading, error, refresh } = useAdminData<AdminUsersPageResponse>(
-    "/api/admin/users",
+  const [dateRange, setDateRange] = useState("7d");
+  const { data, loading, error } = useAdminData<AdminUsersPageResponse>(
+    `/api/admin/users?range=${dateRange}`,
   );
   const [query, setQuery] = useState("");
   const [countryFilter, setCountryFilter] = useState("all");
@@ -135,9 +136,7 @@ export function Users() {
         return slug === classFilter;
       });
     }
-    if (deviceFilter !== "all") {
-      rows = [];
-    }
+    // Device telemetry is not stored yet; keep rows unchanged.
     return rows;
   }, [
     data?.users,
@@ -149,48 +148,94 @@ export function Users() {
     activityFilter,
   ]);
 
-  const countryChartData = useMemo(
-    () =>
-      (data?.distributions.countries ?? []).map((c, i) => ({
-        country: c.label,
-        users: c.count,
-        color: COUNTRY_COLORS[i % COUNTRY_COLORS.length],
-      })),
-    [data?.distributions.countries],
-  );
+  const countryChartData = useMemo(() => {
+    const byCountry = new Map<string, number>();
+    for (const user of filteredUsers) {
+      const key = user.country || "Unknown";
+      byCountry.set(key, (byCountry.get(key) ?? 0) + 1);
+    }
+    return Array.from(byCountry.entries()).map(([country, users], i) => ({
+      country,
+      users,
+      color: COUNTRY_COLORS[i % COUNTRY_COLORS.length],
+    }));
+  }, [filteredUsers]);
 
-  const genderPieData = useMemo(
-    () =>
-      (data?.distributions.genders ?? []).map((g, i) => ({
-        name: g.label,
-        value: g.count,
-        color: i % 2 === 0 ? "#3B82F6" : "#EC4899",
-      })),
-    [data?.distributions.genders],
-  );
+  const genderPieData = useMemo(() => {
+    const byGender = new Map<string, number>();
+    for (const user of filteredUsers) {
+      const key = user.gender || "Unknown";
+      byGender.set(key, (byGender.get(key) ?? 0) + 1);
+    }
+    return Array.from(byGender.entries()).map(([name, value], i) => ({
+      name,
+      value,
+      color: i % 2 === 0 ? "#3B82F6" : "#EC4899",
+    }));
+  }, [filteredUsers]);
 
   const devicePieData = useMemo(() => {
-    const n = data?.totalUserCount ?? 0;
+    const n = filteredUsers.length;
     return [{ name: "Unknown", value: Math.max(n, 1), color: "#6B7280" }];
-  }, [data?.totalUserCount]);
+  }, [filteredUsers.length]);
 
-  const classPieData = useMemo(
-    () =>
-      (data?.distributions.cabinClasses ?? []).map((c, i) => ({
-        name: c.label,
-        value: c.count,
-        color: CLASS_PIE_COLORS[i % CLASS_PIE_COLORS.length],
-      })),
-    [data?.distributions.cabinClasses],
-  );
+  const classPieData = useMemo(() => {
+    const byClass = new Map<string, number>();
+    for (const user of filteredUsers) {
+      const key = user.preferredClass || "Unknown";
+      byClass.set(key, (byClass.get(key) ?? 0) + 1);
+    }
+    return Array.from(byClass.entries()).map(([name, value], i) => ({
+      name,
+      value,
+      color: CLASS_PIE_COLORS[i % CLASS_PIE_COLORS.length],
+    }));
+  }, [filteredUsers]);
 
-  const seatBars = data?.distributions.seatPreferences ?? [];
+  const seatBars = useMemo(() => {
+    const bySeat = new Map<string, number>();
+    for (const user of filteredUsers) {
+      const key = user.seatPreference || "Unknown";
+      bySeat.set(key, (bySeat.get(key) ?? 0) + 1);
+    }
+    return Array.from(bySeat.entries()).map(([label, count]) => ({ label, count }));
+  }, [filteredUsers]);
   const totalForSeat = seatBars.reduce((s, x) => s + x.count, 0) || 1;
 
-  const departureBars = (data?.distributions.flightTimings ?? []).map((f) => ({
-    time: f.label,
-    count: f.count,
-  }));
+  const departureBars = useMemo(() => {
+    const byTiming = new Map<string, number>();
+    for (const user of filteredUsers) {
+      const key = user.flightTiming || "Unknown";
+      byTiming.set(key, (byTiming.get(key) ?? 0) + 1);
+    }
+    return Array.from(byTiming.entries()).map(([time, count]) => ({ time, count }));
+  }, [filteredUsers]);
+
+  const ageDistribution = useMemo(() => {
+    const buckets = new Map<string, number>([
+      ["18-24", 0],
+      ["25-34", 0],
+      ["35-44", 0],
+      ["45-54", 0],
+      ["55+", 0],
+      ["Unknown", 0],
+    ]);
+    for (const user of filteredUsers) {
+      const age = user.age;
+      if (age == null || age < 18) buckets.set("Unknown", (buckets.get("Unknown") ?? 0) + 1);
+      else if (age <= 24) buckets.set("18-24", (buckets.get("18-24") ?? 0) + 1);
+      else if (age <= 34) buckets.set("25-34", (buckets.get("25-34") ?? 0) + 1);
+      else if (age <= 44) buckets.set("35-44", (buckets.get("35-44") ?? 0) + 1);
+      else if (age <= 54) buckets.set("45-54", (buckets.get("45-54") ?? 0) + 1);
+      else buckets.set("55+", (buckets.get("55+") ?? 0) + 1);
+    }
+    return Array.from(buckets.entries()).map(([range, count]) => ({ range, count }));
+  }, [filteredUsers]);
+
+  const filteredPowerUsers = useMemo(
+    () => [...filteredUsers].sort((a, b) => b.engagementScore - a.engagementScore).slice(0, 10),
+    [filteredUsers],
+  );
 
   const totalUsers = data?.totalUserCount ?? 0;
 
@@ -214,7 +259,7 @@ export function Users() {
           </div>
           <button
             type="button"
-            onClick={() => void refresh()}
+            onClick={() => window.location.reload()}
             className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-700"
           >
             <RefreshCw className="h-3.5 w-3.5" />
@@ -231,6 +276,15 @@ export function Users() {
 
       <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
         <div className="flex flex-wrap items-center gap-3">
+          <select
+            value={dateRange}
+            onChange={(e) => setDateRange(e.target.value)}
+            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm"
+          >
+            <option value="7d">Last 7 days</option>
+            <option value="15d">Last 15 days</option>
+            <option value="30d">Last 30 days</option>
+          </select>
           <div className="relative min-w-[220px] flex-1">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
             <Input
@@ -265,7 +319,7 @@ export function Users() {
             <option value="55+">55+</option>
             <option value="unknown">Unknown</option>
           </select>
-          <select
+          {/* <select
             value={deviceFilter}
             onChange={(e) => setDeviceFilter(e.target.value)}
             className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm"
@@ -274,7 +328,7 @@ export function Users() {
             <option value="mobile">Mobile</option>
             <option value="desktop">Desktop</option>
             <option value="tablet">Tablet</option>
-          </select>
+          </select> */}
           <select
             value={classFilter}
             onChange={(e) => setClassFilter(e.target.value)}
@@ -352,7 +406,7 @@ export function Users() {
           <h3 className="mb-4 text-lg font-semibold text-gray-900">Age Distribution</h3>
           <div className="h-[250px]">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data?.ageDistribution ?? []}>
+              <BarChart data={ageDistribution}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
                 <XAxis dataKey="range" stroke="#9CA3AF" style={{ fontSize: 12 }} />
                 <YAxis stroke="#9CA3AF" style={{ fontSize: 12 }} />
@@ -671,7 +725,7 @@ export function Users() {
           <h3 className="text-lg font-semibold text-gray-900">Power User Analytics</h3>
           <Badge variant="outline" className="gap-1">
             <Award className="h-3 w-3" />
-            Top {Math.min(10, data?.powerUsers.length ?? 0)} users
+            Top {Math.min(10, filteredPowerUsers.length)} users
           </Badge>
         </div>
         <div className="overflow-x-auto">
@@ -687,7 +741,7 @@ export function Users() {
               </tr>
             </thead>
             <tbody>
-              {(data?.powerUsers ?? []).map((user) => (
+              {filteredPowerUsers.map((user) => (
                 <tr key={user.id} className="border-b border-gray-100 hover:bg-gray-50">
                   <td className="px-4 py-3 font-mono text-sm text-gray-600">{user.displayId}</td>
                   <td className="px-4 py-3 text-sm font-medium text-gray-900">{user.name}</td>

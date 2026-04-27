@@ -24,6 +24,12 @@ export class AdminBackendError extends Error {
   }
 }
 
+function withDays(path: string, days?: number): string {
+  if (!days) return path;
+  const joiner = path.includes("?") ? "&" : "?";
+  return `${path}${joiner}days=${encodeURIComponent(String(days))}`;
+}
+
 function normalizeBase(base: string): string {
   return base.replace(/\/+$/, "");
 }
@@ -151,9 +157,9 @@ export function mapUiStatusToBackend(status: UiFeedbackStatus) {
   }
 }
 
-export async function getAdminOverviewMetrics() {
+export async function getAdminOverviewMetrics(days?: number) {
   return fetchAdminBackend<BackendAdminMetricsOverviewResponse>(
-    "/api/admin/metrics/overview",
+    withDays("/api/admin/metrics/overview", days),
   );
 }
 
@@ -191,23 +197,23 @@ export async function getAdminSessionDetail(sessionId: string) {
   );
 }
 
-export async function getAdminUsersAnalytics() {
+export async function getAdminUsersAnalytics(days?: number) {
   return fetchAdminBackend<BackendAdminUsersAnalyticsResponse>(
-    "/api/admin/users/analytics",
+    withDays("/api/admin/users/analytics", days),
   );
 }
 
-export async function getAdminFunnelAnalytics() {
-  return fetchAdminBackend<BackendAdminFunnelResponse>("/api/admin/funnel");
+export async function getAdminFunnelAnalytics(days?: number) {
+  return fetchAdminBackend<BackendAdminFunnelResponse>(withDays("/api/admin/funnel", days));
 }
 
-export async function getAdminBehaviorAnalytics() {
-  return fetchAdminBackend<BackendAdminBehaviorResponse>("/api/admin/behavior");
+export async function getAdminBehaviorAnalytics(days?: number) {
+  return fetchAdminBackend<BackendAdminBehaviorResponse>(withDays("/api/admin/behavior", days));
 }
 
-export async function getAdminAiPerformance() {
+export async function getAdminAiPerformance(days?: number) {
   return fetchAdminBackend<BackendAdminAiPerformanceResponse>(
-    "/api/admin/ai/performance",
+    withDays("/api/admin/ai/performance", days),
   );
 }
 
@@ -217,15 +223,17 @@ export async function getAdminFeedbackSummaryV2() {
   );
 }
 
-export async function getAdminRetention() {
+export async function getAdminRetention(days?: number) {
   return fetchAdminBackend<BackendAdminRetentionResponse>(
-    "/api/admin/retention",
+    withDays("/api/admin/retention", days),
   );
 }
 
-export async function getAdminApiMonitoring() {
+export async function getAdminApiMonitoring(days?: number) {
+  const window = days ? `${days}d` : undefined;
+  const path = window ? `/api/admin/api-monitoring?window=${encodeURIComponent(window)}` : "/api/admin/api-monitoring";
   return fetchAdminBackend<BackendAdminApiMonitoringResponse>(
-    "/api/admin/api-monitoring",
+    path,
   );
 }
 

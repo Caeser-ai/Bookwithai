@@ -9,13 +9,11 @@ import {
   ExternalLink,
   Eye,
   Filter,
-  Globe,
   Lightbulb,
   MessageSquare,
   Plane,
   RefreshCw,
   Search,
-  Smartphone,
   Target,
   TrendingDown,
   TrendingUp,
@@ -142,13 +140,9 @@ function InlineMetricRow({ metric }: { metric: AdminInlineMetric }) {
 }
 
 export function Overview() {
-  const { data, loading, error, refresh } =
-    useAdminData<AdminOverviewPageResponse>("/api/admin/overview");
-
   const [dateRange, setDateRange] = useState("7d");
-  const [countryFilter, setCountryFilter] = useState("all");
-  const [deviceFilter, setDeviceFilter] = useState("all");
-  const [trafficSource, setTrafficSource] = useState("all");
+  const { data, loading, error } =
+    useAdminData<AdminOverviewPageResponse>(`/api/admin/overview?range=${dateRange}`);
   const [showMobileFilters, setShowMobileFilters] = useState(false);
 
   if (loading && !data) {
@@ -171,7 +165,7 @@ export function Overview() {
             Last updated: {data?.generatedLabel ?? "—"}
           </div>
           <button
-            onClick={() => void refresh()}
+            onClick={() => window.location.reload()}
             className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-700"
           >
             <RefreshCw className="h-3.5 w-3.5" />
@@ -195,9 +189,6 @@ export function Overview() {
             <div className="flex items-center gap-2">
               <Filter className="w-4 h-4 text-gray-500" />
               <span>Filters</span>
-              <span className="ml-1 rounded-full bg-blue-100 text-blue-700 text-[10px] px-1.5 py-0.5">
-                visual only
-              </span>
             </div>
             <ChevronDown
               className={`w-4 h-4 transition-transform ${
@@ -212,24 +203,13 @@ export function Overview() {
                 value={dateRange}
                 onChange={setDateRange}
                 options={[
-                  ["24h", "Last 24 Hours"],
                   ["7d", "Last 7 Days"],
+                  ["15d", "Last 15 Days"],
                   ["30d", "Last 30 Days"],
-                  ["90d", "Last 90 Days"],
                 ]}
               />
-              <FilterRow
-                icon={<Globe className="w-4 h-4 text-gray-500 flex-shrink-0" />}
-                value={countryFilter}
-                onChange={setCountryFilter}
-                options={[
-                  ["all", "All Countries"],
-                  ["us", "United States"],
-                  ["uk", "United Kingdom"],
-                  ["ca", "Canada"],
-                  ["eu", "Europe"],
-                ]}
-              />
+              {/* Country filter disabled: overview payload has no country dimension. */}
+              {/* Device filter disabled until backend device telemetry is available.
               <FilterRow
                 icon={<Smartphone className="w-4 h-4 text-gray-500 flex-shrink-0" />}
                 value={deviceFilter}
@@ -241,18 +221,8 @@ export function Overview() {
                   ["tablet", "Tablet"],
                 ]}
               />
-              <FilterRow
-                icon={<Filter className="w-4 h-4 text-gray-500 flex-shrink-0" />}
-                value={trafficSource}
-                onChange={setTrafficSource}
-                options={[
-                  ["all", "All Sources"],
-                  ["organic", "Organic Search"],
-                  ["direct", "Direct"],
-                  ["social", "Social Media"],
-                  ["paid", "Paid Ads"],
-                ]}
-              />
+              */}
+              {/* Traffic source filter disabled: source/UTM is not present in overview payload. */}
             </div>
           )}
         </div>
@@ -262,24 +232,13 @@ export function Overview() {
             value={dateRange}
             onChange={setDateRange}
             options={[
-              ["24h", "Last 24 Hours"],
               ["7d", "Last 7 Days"],
+              ["15d", "Last 15 Days"],
               ["30d", "Last 30 Days"],
-              ["90d", "Last 90 Days"],
             ]}
           />
-          <FilterInline
-            icon={<Globe className="w-4 h-4 text-gray-500" />}
-            value={countryFilter}
-            onChange={setCountryFilter}
-            options={[
-              ["all", "All Countries"],
-              ["us", "United States"],
-              ["uk", "United Kingdom"],
-              ["ca", "Canada"],
-              ["eu", "Europe"],
-            ]}
-          />
+          {/* Country filter disabled: overview payload has no country dimension. */}
+          {/* Device filter disabled until backend device telemetry is available.
           <FilterInline
             icon={<Smartphone className="w-4 h-4 text-gray-500" />}
             value={deviceFilter}
@@ -291,21 +250,8 @@ export function Overview() {
               ["tablet", "Tablet"],
             ]}
           />
-          <FilterInline
-            icon={<Filter className="w-4 h-4 text-gray-500" />}
-            value={trafficSource}
-            onChange={setTrafficSource}
-            options={[
-              ["all", "All Sources"],
-              ["organic", "Organic Search"],
-              ["direct", "Direct"],
-              ["social", "Social Media"],
-              ["paid", "Paid Ads"],
-            ]}
-          />
-          <span className="ml-auto text-[11px] text-gray-400">
-            Filters are visual-only until per-user telemetry is captured.
-          </span>
+          */}
+          {/* Traffic source filter disabled: source/UTM is not present in overview payload. */}
         </div>
       </div>
 

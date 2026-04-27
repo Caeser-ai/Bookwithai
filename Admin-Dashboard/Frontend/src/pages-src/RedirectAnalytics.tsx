@@ -6,7 +6,6 @@ import {
   ArrowUpRight,
   Calendar,
   ExternalLink,
-  Filter,
   MessageSquare,
   RefreshCw,
   TrendingDown,
@@ -34,12 +33,10 @@ import { useAdminData } from "@/lib/use-admin-data";
 const PIE_COLORS = ["#8B5CF6", "#3B82F6", "#10B981", "#F59E0B", "#EC4899", "#6B7280"];
 
 export function RedirectAnalytics() {
-  const { data, loading, error, refresh } = useAdminData<AdminFunnelPageV2Response>(
-    "/api/admin/funnel",
+  const [dateRange, setDateRange] = useState("7d");
+  const { data, loading, error } = useAdminData<AdminFunnelPageV2Response>(
+    `/api/admin/funnel?range=${dateRange}`,
   );
-  const [dateRange, setDateRange] = useState("30d");
-  const [countryFilter, setCountryFilter] = useState("all");
-  const [deviceFilter, setDeviceFilter] = useState("all");
 
   const redirectStage = data?.stages.find((stage) => stage.id === "redirects") ?? data?.stages.at(-1);
   const avgConversion =
@@ -82,7 +79,7 @@ export function RedirectAnalytics() {
           </p>
         </div>
         <button
-          onClick={() => void refresh()}
+          onClick={() => window.location.reload()}
           className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
         >
           <RefreshCw className="h-4 w-4" />
@@ -101,32 +98,12 @@ export function RedirectAnalytics() {
               className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700"
             >
               <option value="7d">Last 7 days</option>
+              <option value="15d">Last 15 days</option>
               <option value="30d">Last 30 days</option>
-              <option value="90d">Last 90 days</option>
             </select>
           </div>
-          <div className="flex items-center gap-2 text-sm text-gray-600">
-            <Filter className="h-4 w-4" />
-            <span>Country</span>
-            <select
-              value={countryFilter}
-              onChange={(event) => setCountryFilter(event.target.value)}
-              className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700"
-            >
-              <option value="all">All countries</option>
-              <option value="tracked">Tracked in user profiles</option>
-            </select>
-          </div>
-          <div className="flex items-center gap-2 text-sm text-gray-600">
-            <span>Device</span>
-            <select
-              value={deviceFilter}
-              onChange={(event) => setDeviceFilter(event.target.value)}
-              className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700"
-            >
-              <option value="all">Not tracked</option>
-            </select>
-          </div>
+          {/* Country/device filters disabled: redirect view has no direct
+              country/device-attributed redirect metrics in current payload. */}
           <div className="ml-auto rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
             Average flight price and browser/device redirect cuts are not available in the current
             data model.

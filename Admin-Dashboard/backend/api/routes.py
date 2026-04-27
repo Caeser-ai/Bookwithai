@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, HTTPException, Depends, Header, Query
+from fastapi import APIRouter, HTTPException, Depends, Header, Query, Body
 from pydantic import BaseModel
 from sqlalchemy import and_, func, text
 from sqlalchemy.orm import Session
@@ -709,6 +709,14 @@ class SessionImportConversationPayload(BaseModel):
 
 class SessionImportPayload(BaseModel):
     sessions: List[SessionImportConversationPayload] = []
+
+
+class AdminApiKeyUpdatePayload(BaseModel):
+    keyName: str
+    provider: Optional[str] = None
+    status: Optional[str] = None
+    quotaDaily: Optional[int] = None
+    costPerRequest: Optional[float] = None
 
 
 class PriceAlertUpdatePayload(BaseModel):
@@ -4465,6 +4473,10 @@ async def admin_retention(
 @router.get("/admin/api-monitoring")
 async def admin_api_monitoring(
     _: None = Depends(require_admin),
+    window: str = Query("24h"),
+    provider: Optional[str] = Query(None),
+    endpoint: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
     db_user: Session = Depends(get_user_db),
 ):
     """Per-request API monitoring feed from persisted request logs."""
@@ -4487,6 +4499,20 @@ async def admin_api_monitoring(
               user_agent TEXT,
               error_message TEXT,
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    db_user.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS api_provider_config (
+              provider VARCHAR(64) PRIMARY KEY,
+              quota_daily INTEGER NOT NULL DEFAULT 0,
+              cost_per_request NUMERIC(12, 6) NOT NULL DEFAULT 0,
+              currency VARCHAR(8) NOT NULL DEFAULT 'USD',
+              is_active BOOLEAN NOT NULL DEFAULT TRUE,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
@@ -4531,18 +4557,61 @@ async def admin_api_monitoring(
             "CREATE INDEX IF NOT EXISTS idx_api_key_registry_last_used_at ON api_key_registry (last_used_at)"
         )
     )
+    db_user.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS idx_api_provider_config_active ON api_provider_config (is_active)"
+        )
+    )
+    default_provider_configs = [
+        ("Chat", 200000, 0.0025),
+        ("Amadeus", 120000, 0.0035),
+        ("SerpAPI", 80000, 0.0050),
+        ("Sessions", 250000, 0.0),
+        ("Trips", 100000, 0.0),
+        ("Price Alerts", 100000, 0.0),
+        ("OpenWeather", 50000, 0.0010),
+        ("Google Maps", 70000, 0.0020),
+        ("FlightAware", 20000, 0.0120),
+        ("Auth", 150000, 0.0004),
+        ("Health", 500000, 0.0),
+        ("Internal", 500000, 0.0),
+    ]
+    for provider, quota_daily, cost_per_request in default_provider_configs:
+        db_user.execute(
+            text(
+                """
+                INSERT INTO api_provider_config (provider, quota_daily, cost_per_request, currency, is_active, updated_at)
+                VALUES (:provider, :quota_daily, :cost_per_request, 'USD', TRUE, NOW())
+                ON CONFLICT (provider) DO NOTHING
+                """
+            ),
+            {
+                "provider": provider,
+                "quota_daily": quota_daily,
+                "cost_per_request": cost_per_request,
+            },
+        )
     db_user.commit()
 
     now = datetime.utcnow()
-    since_24h = now - timedelta(hours=24)
-    logs = (
+    window_map = {"1h": timedelta(hours=1), "6h": timedelta(hours=6), "24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30)}
+    since = now - window_map.get(window, timedelta(hours=24))
+    base_query = (
         db_user.query(ApiRequestLog)
-        .filter(ApiRequestLog.created_at >= since_24h)
-        .filter(~ApiRequestLog.path.like("/api/admin/%"))
-        .order_by(ApiRequestLog.created_at.desc())
-        .limit(5000)
-        .all()
+        .filter(ApiRequestLog.created_at >= since)
+        .filter(~ApiRequestLog.path.like("/api/admin/api-monitoring%"))
+        .filter(~ApiRequestLog.path.like("/api/admin/api-keys%"))
     )
+    if provider:
+        base_query = base_query.filter(ApiRequestLog.provider == provider)
+    if endpoint:
+        base_query = base_query.filter(ApiRequestLog.path.ilike(f"%{endpoint}%"))
+    if status == "failed":
+        base_query = base_query.filter(ApiRequestLog.status_code >= 400)
+    elif status == "success":
+        base_query = base_query.filter(ApiRequestLog.status_code < 400)
+
+    logs = base_query.order_by(ApiRequestLog.created_at.desc()).limit(10000).all()
 
     total_requests = len(logs)
     failed_requests = sum(1 for log in logs if (log.status_code or 0) >= 400)
@@ -4614,6 +4683,9 @@ async def admin_api_monitoring(
     request_volume = [
         {"label": f"{hour:02d}:00", "requests": hourly_requests.get(f"{hour:02d}:00", 0)}
         for hour in range(24)
+    ] if window in ("24h", "7d", "30d") else [
+        {"label": minute.strftime("%H:%M"), "requests": 0}
+        for minute in [now - timedelta(minutes=i) for i in range(59, -1, -1)]
     ]
     error_rate_trend = [
         {
@@ -4630,6 +4702,59 @@ async def admin_api_monitoring(
         {"provider": provider, "requests": count}
         for provider, count in provider_counter.most_common(8)
     ]
+    provider_config_rows = db_user.execute(
+        text(
+            """
+            SELECT provider, quota_daily, cost_per_request, currency, is_active
+            FROM api_provider_config
+            WHERE is_active = TRUE
+            """
+        )
+    ).fetchall()
+    provider_config_map = {row.provider: row for row in provider_config_rows}
+
+    rate_limits = []
+    for provider, usage in provider_counter.items():
+        cfg = provider_config_map.get(provider)
+        quota = int(cfg.quota_daily) if cfg else 0
+        pct = round((usage / quota) * 100, 2) if quota > 0 else 0.0
+        rate_limits.append(
+            {
+                "provider": provider,
+                "used": usage,
+                "quota": quota,
+                "percentUsed": pct,
+            }
+        )
+    rate_limits.sort(key=lambda row: row["percentUsed"], reverse=True)
+
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    monthly_logs = (
+        db_user.query(ApiRequestLog.provider, func.count(ApiRequestLog.id))
+        .filter(ApiRequestLog.created_at >= month_start)
+        .filter(~ApiRequestLog.path.like("/api/admin/api-monitoring%"))
+        .filter(~ApiRequestLog.path.like("/api/admin/api-keys%"))
+        .group_by(ApiRequestLog.provider)
+        .all()
+    )
+    monthly_usage = {provider or "Internal": count for provider, count in monthly_logs}
+    cost_breakdown = []
+    total_monthly_cost = 0.0
+    for provider, count in monthly_usage.items():
+        cfg = provider_config_map.get(provider)
+        cost_per_request = float(cfg.cost_per_request) if cfg else 0.0
+        provider_cost = round(count * cost_per_request, 4)
+        total_monthly_cost += provider_cost
+        cost_breakdown.append(
+            {
+                "provider": provider,
+                "requests": count,
+                "costPerRequest": cost_per_request,
+                "monthlyCost": round(provider_cost, 2),
+            }
+        )
+    cost_breakdown.sort(key=lambda row: row["monthlyCost"], reverse=True)
+
     key_usage_24h = {key_name: count for key_name, count in key_counter.items()}
     key_rows = db_user.execute(
         text(
@@ -4649,6 +4774,15 @@ async def admin_api_monitoring(
             "lastUsed": row.last_used_at.isoformat() if row.last_used_at else None,
             "keyLast4": row.key_last4,
             "requests24h": key_usage_24h.get(row.key_name, 0),
+            "quotaDaily": int(provider_config_map.get(row.provider).quota_daily)
+            if provider_config_map.get(row.provider) is not None
+            else 0,
+            "costPerRequest": float(provider_config_map.get(row.provider).cost_per_request)
+            if provider_config_map.get(row.provider) is not None
+            else 0.0,
+            "currency": provider_config_map.get(row.provider).currency
+            if provider_config_map.get(row.provider) is not None
+            else "USD",
         }
         for row in key_rows
     ]
@@ -4667,6 +4801,7 @@ async def admin_api_monitoring(
 
     return {
         "generated_at": now.isoformat(),
+        "window": window,
         "totals": {
             "total_requests": total_requests,
             "avg_latency_ms": avg_latency_ms,
@@ -4684,8 +4819,119 @@ async def admin_api_monitoring(
             "failed": failed_requests,
         },
         "api_keys": api_keys,
+        "rate_limits": rate_limits,
+        "cost_monitoring": {
+            "currency": "USD",
+            "total_monthly_cost": round(total_monthly_cost, 2),
+            "avg_cost_per_request": round(total_monthly_cost / max(sum(monthly_usage.values()), 1), 6),
+            "monthly_breakdown": cost_breakdown,
+        },
         "recent_errors": recent_errors,
     }
+
+
+@router.get("/admin/api-keys")
+async def admin_api_keys(
+    _: None = Depends(require_admin),
+    db_user: Session = Depends(get_user_db),
+):
+    rows = db_user.execute(
+        text(
+            """
+            SELECT
+              k.key_name,
+              k.provider,
+              k.status,
+              k.key_last4,
+              k.last_used_at,
+              p.quota_daily,
+              p.cost_per_request,
+              p.currency
+            FROM api_key_registry k
+            LEFT JOIN api_provider_config p ON p.provider = k.provider
+            ORDER BY k.last_used_at DESC NULLS LAST, k.key_name ASC
+            """
+        )
+    ).fetchall()
+    return {
+        "items": [
+            {
+                "keyName": row.key_name,
+                "provider": row.provider,
+                "status": row.status,
+                "keyLast4": row.key_last4,
+                "lastUsed": row.last_used_at.isoformat() if row.last_used_at else None,
+                "quotaDaily": int(row.quota_daily) if row.quota_daily is not None else 0,
+                "costPerRequest": float(row.cost_per_request) if row.cost_per_request is not None else 0.0,
+                "currency": row.currency or "USD",
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.patch("/admin/api-keys")
+async def admin_update_api_key(
+    payload: AdminApiKeyUpdatePayload = Body(...),
+    _: None = Depends(require_admin),
+    db_user: Session = Depends(get_user_db),
+):
+    if payload.status and payload.status not in {"active", "disabled", "rotating"}:
+        raise HTTPException(status_code=400, detail="Invalid status")
+
+    key_row = db_user.execute(
+        text("SELECT key_name, provider FROM api_key_registry WHERE key_name = :key_name"),
+        {"key_name": payload.keyName},
+    ).fetchone()
+    if not key_row:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    target_provider = payload.provider or key_row.provider
+    if payload.provider:
+        db_user.execute(
+            text("UPDATE api_key_registry SET provider = :provider, updated_at = NOW() WHERE key_name = :key_name"),
+            {"provider": payload.provider, "key_name": payload.keyName},
+        )
+    if payload.status:
+        db_user.execute(
+            text("UPDATE api_key_registry SET status = :status, updated_at = NOW() WHERE key_name = :key_name"),
+            {"status": payload.status, "key_name": payload.keyName},
+        )
+
+    if payload.quotaDaily is not None or payload.costPerRequest is not None:
+        provider_cfg = db_user.execute(
+            text("SELECT quota_daily, cost_per_request FROM api_provider_config WHERE provider = :provider"),
+            {"provider": target_provider},
+        ).fetchone()
+        next_quota = (
+            payload.quotaDaily
+            if payload.quotaDaily is not None
+            else (int(provider_cfg.quota_daily) if provider_cfg and provider_cfg.quota_daily is not None else 0)
+        )
+        next_cost = (
+            payload.costPerRequest
+            if payload.costPerRequest is not None
+            else (float(provider_cfg.cost_per_request) if provider_cfg and provider_cfg.cost_per_request is not None else 0.0)
+        )
+        db_user.execute(
+            text(
+                """
+                INSERT INTO api_provider_config (provider, quota_daily, cost_per_request, currency, is_active, updated_at)
+                VALUES (:provider, :quota_daily, :cost_per_request, 'USD', TRUE, NOW())
+                ON CONFLICT (provider) DO UPDATE SET
+                  quota_daily = EXCLUDED.quota_daily,
+                  cost_per_request = EXCLUDED.cost_per_request,
+                  updated_at = NOW()
+                """
+            ),
+            {
+                "provider": target_provider,
+                "quota_daily": next_quota,
+                "cost_per_request": next_cost,
+            },
+        )
+    db_user.commit()
+    return {"ok": True}
 
 
 @router.get("/admin/sessions")

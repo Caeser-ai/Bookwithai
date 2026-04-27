@@ -32,7 +32,7 @@ const toneMap = {
 };
 
 export function UserBehavior() {
-  const { data, loading, error, refresh } = useAdminData<AdminBehaviorPageResponse>(
+  const { data, loading, error } = useAdminData<AdminBehaviorPageResponse>(
     "/api/admin/behavior",
   );
   const sparkline = data?.activityTrend ?? [];
@@ -63,71 +63,6 @@ export function UserBehavior() {
     engagementBands.high + engagementBands.moderate + engagementBands.low,
     1,
   );
-  const filterUsageData = [
-    {
-      filter: "Search volume",
-      usage:
-        (data?.searchDistribution ?? []).reduce((sum, row) => sum + row.count, 0) > 0
-          ? 76
-          : 0,
-      color: "#3B82F6",
-    },
-    {
-      filter: "Message depth",
-      usage:
-        (data?.messageDistribution ?? []).reduce((sum, row) => sum + row.count, 0) > 0
-          ? 58
-          : 0,
-      color: "#10B981",
-    },
-    {
-      filter: "Session duration",
-      usage:
-        (data?.sessionDurationDistribution ?? []).reduce((sum, row) => sum + row.count, 0) > 0
-          ? 42
-          : 0,
-      color: "#F59E0B",
-    },
-    {
-      filter: "Route focus",
-      usage: (data?.topRoutes ?? []).length > 0 ? 35 : 0,
-      color: "#8B5CF6",
-    },
-  ];
-  const sortingBehaviorData = [
-    {
-      option: "Most searched first",
-      usage: 42,
-      users: (data?.topRoutes ?? []).reduce((sum, row) => sum + row.count, 0),
-    },
-    {
-      option: "Latest activity first",
-      usage: 28,
-      users: (data?.recentActivity ?? []).length,
-    },
-    {
-      option: "High engagement first",
-      usage: 18,
-      users: engagementBands.high,
-    },
-    {
-      option: "Short sessions first",
-      usage: 12,
-      users: engagementBands.low,
-    },
-  ];
-  const decisionSpeedMetrics = [
-    { label: "Time to AI Start", avgTime: "12s", trend: "+4%", trendUp: true, color: "#EF4444" },
-    { label: "Time to First Search", avgTime: "45s", trend: "-3%", trendUp: false, color: "#10B981" },
-    { label: "Time to View Options", avgTime: "2m 18s", trend: "-6%", trendUp: false, color: "#10B981" },
-    { label: "Time to Redirect", avgTime: "3m 45s", trend: "+2%", trendUp: true, color: "#EF4444" },
-  ];
-  const trendingRoutes = (data?.topRoutes ?? []).slice(0, 5).map((route, index) => ({
-    route: route.label,
-    growth: `${index % 2 === 0 ? "+" : "-"}${Math.max(3, 14 - index * 2)}%`,
-    searches: route.count,
-    rank: index + 1,
-  }));
 
   if (loading && !data) {
     return <PageLoader />;
@@ -147,7 +82,7 @@ export function UserBehavior() {
             Last updated: {data?.generatedLabel ?? "Unavailable"}
           </div>
           <button
-            onClick={() => void refresh()}
+            onClick={() => window.location.reload()}
             className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
           >
             <RefreshCw className="h-4 w-4" />
@@ -387,95 +322,9 @@ export function UserBehavior() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <h2 className="mb-4 text-lg font-semibold text-gray-900">Filter Usage Distribution</h2>
-          <div className="space-y-3">
-            {filterUsageData.map((item) => (
-              <div key={item.filter}>
-                <div className="mb-1 flex items-center justify-between text-sm">
-                  <span className="text-gray-700">{item.filter}</span>
-                  <span className="font-semibold text-gray-900">{item.usage}%</span>
-                </div>
-                <div className="h-2 w-full rounded-full bg-gray-100">
-                  <div
-                    className="h-2 rounded-full"
-                    style={{ width: `${item.usage}%`, backgroundColor: item.color }}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <h2 className="mb-4 text-lg font-semibold text-gray-900">Sorting Preferences</h2>
-          <div className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={sortingBehaviorData} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis type="number" tickLine={false} axisLine={false} />
-                <YAxis type="category" dataKey="option" tickLine={false} axisLine={false} width={140} />
-                <Tooltip />
-                <Bar dataKey="usage" fill="#F59E0B" radius={[0, 8, 8, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-      </div>
-
-      <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-        <h2 className="mb-4 text-lg font-semibold text-gray-900">User Decision Speed</h2>
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {decisionSpeedMetrics.map((metric) => (
-            <div key={metric.label} className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-              <p className="text-xs text-gray-600">{metric.label}</p>
-              <p className="mt-1 text-2xl font-semibold text-gray-900">{metric.avgTime}</p>
-              <p
-                className={`mt-1 text-xs font-semibold ${
-                  metric.trendUp ? "text-red-600" : "text-green-600"
-                }`}
-              >
-                {metric.trend}
-              </p>
-              <div className="mt-3 h-10">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={sparkline}>
-                    <Area
-                      type="monotone"
-                      dataKey="messages"
-                      stroke={metric.color}
-                      fill={metric.color}
-                      fillOpacity={0.15}
-                      strokeWidth={2}
-                    />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-        <h2 className="mb-4 text-lg font-semibold text-gray-900">Trending Routes</h2>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
-          {trendingRoutes.map((route) => (
-            <div key={route.route} className="rounded-lg border border-green-200 bg-gradient-to-br from-green-50 to-blue-50 p-4">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-gray-500">#{route.rank}</span>
-                <span
-                  className={`text-xs font-bold ${
-                    route.growth.startsWith("+") ? "text-green-600" : "text-red-600"
-                  }`}
-                >
-                  {route.growth}
-                </span>
-              </div>
-              <p className="mt-2 text-sm font-semibold text-gray-900">{route.route}</p>
-              <p className="mt-1 text-xs text-gray-600">{route.searches.toLocaleString()} searches</p>
-            </div>
-          ))}
-        </div>
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+        Sorting preferences, filter usage distribution, and decision-speed telemetry are not stored
+        in the current analytics schema, so those visual-only widgets are intentionally removed.
       </div>
 
       <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">

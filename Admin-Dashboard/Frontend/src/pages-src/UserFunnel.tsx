@@ -37,13 +37,16 @@ import { useAdminData } from "@/lib/use-admin-data";
 type Stage = AdminFunnelPageV2Response["stages"][number];
 
 export function UserFunnel() {
-  const { data, loading, error, refresh } =
-    useAdminData<AdminFunnelPageV2Response>("/api/admin/funnel");
+  const [dateRange, setDateRange] = useState("7d");
+  const { data, loading, error } =
+    useAdminData<AdminFunnelPageV2Response>(`/api/admin/funnel?range=${dateRange}`);
 
   const [selectedStage, setSelectedStage] = useState<string | null>(null);
-  const [dateRange, setDateRange] = useState("7 days");
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
+  const [countryFilter, setCountryFilter] = useState("all");
+  const [routeFilter, setRouteFilter] = useState("all");
+  const [airlineFilter, setAirlineFilter] = useState("all");
 
   if (loading && !data) {
     return <PageLoader />;
@@ -53,9 +56,43 @@ export function UserFunnel() {
   const activeStage: Stage | undefined = stages.find(
     (stage) => stage.id === selectedStage,
   );
+  const redirectStageId = stages.find((stage) =>
+    stage.id.toLowerCase().includes("redirect"),
+  )?.id;
+  const routeOptions = (data?.topRoutes ?? []).map((item) => item.label);
+  const airlineOptions =
+    redirectStageId && data?.stageDetails[redirectStageId]
+      ? data.stageDetails[redirectStageId].listItems.map((item) => item.label)
+      : [];
+
   const stageDetails = activeStage
     ? data?.stageDetails[activeStage.id]
     : undefined;
+  const filteredStageDetails =
+    activeStage && stageDetails
+      ? {
+          ...stageDetails,
+          listItems: stageDetails.listItems.filter((item) => {
+            if (activeStage.id === stages[0]?.id && countryFilter !== "all") {
+              return item.label === countryFilter;
+            }
+            if (
+              (activeStage.id === stages[2]?.id || activeStage.id === stages[3]?.id) &&
+              routeFilter !== "all"
+            ) {
+              return item.label === routeFilter;
+            }
+            if (activeStage.id === redirectStageId && airlineFilter !== "all") {
+              return item.label === airlineFilter;
+            }
+            return true;
+          }),
+        }
+      : stageDetails;
+  const filteredCountrySegments =
+    countryFilter === "all"
+      ? data?.countrySegments ?? []
+      : (data?.countrySegments ?? []).filter((country) => country.name === countryFilter);
 
   const overallConv = (() => {
     if (stages.length < 2) return 0;
@@ -82,7 +119,7 @@ export function UserFunnel() {
             Last updated: {data?.generatedLabel ?? "—"}
           </div>
           <button
-            onClick={() => void refresh()}
+            onClick={() => window.location.reload()}
             className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-700"
           >
             <RefreshCw className="h-3.5 w-3.5" />
@@ -113,10 +150,9 @@ export function UserFunnel() {
               onChange={(event) => setDateRange(event.target.value)}
               className="text-xs md:text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white hover:border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
-              <option>Today</option>
-              <option>7 days</option>
-              <option>30 days</option>
-              <option>Custom</option>
+              <option value="7d">Last 7 days</option>
+              <option value="15d">Last 15 days</option>
+              <option value="30d">Last 30 days</option>
             </select>
           </div>
 
@@ -141,25 +177,63 @@ export function UserFunnel() {
             <ChevronDown className="w-4 h-4 text-gray-500" />
           </button>
 
-          <span className="text-xs px-3 py-1.5 bg-blue-50 text-blue-700 rounded-full border border-blue-200">
-            Filters are visual-only
-          </span>
         </div>
 
         {showFilters ? (
           <div className="mt-4 pt-4 border-t border-gray-200 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
-            {["Device", "Country", "Traffic Source", "Airline", "Route"].map(
-              (label) => (
-                <div key={label}>
-                  <label className="text-xs text-gray-600 mb-1.5 block font-medium">
-                    {label}
-                  </label>
-                  <select className="w-full text-xs md:text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    <option>All {label.toLowerCase()}s</option>
-                  </select>
-                </div>
-              ),
-            )}
+            {/* Device filter disabled: device telemetry is not available in funnel payload. */}
+            <div>
+              <label className="text-xs text-gray-600 mb-1.5 block font-medium">
+                Country
+              </label>
+              <select
+                value={countryFilter}
+                onChange={(event) => setCountryFilter(event.target.value)}
+                className="w-full text-xs md:text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="all">All countries</option>
+                {(data?.countrySegments ?? []).map((country) => (
+                  <option key={country.name} value={country.name}>
+                    {country.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {/* Traffic source filter disabled: source/UTM data is not tracked yet. */}
+            <div>
+              <label className="text-xs text-gray-600 mb-1.5 block font-medium">
+                Airline
+              </label>
+              <select
+                value={airlineFilter}
+                onChange={(event) => setAirlineFilter(event.target.value)}
+                className="w-full text-xs md:text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="all">All airlines</option>
+                {airlineOptions.map((airline) => (
+                  <option key={airline} value={airline}>
+                    {airline}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs text-gray-600 mb-1.5 block font-medium">
+                Route
+              </label>
+              <select
+                value={routeFilter}
+                onChange={(event) => setRouteFilter(event.target.value)}
+                className="w-full text-xs md:text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="all">All routes</option>
+                {routeOptions.map((route) => (
+                  <option key={route} value={route}>
+                    {route}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         ) : null}
       </div>
@@ -337,7 +411,7 @@ export function UserFunnel() {
         </div>
 
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-          {activeStage && stageDetails ? (
+          {activeStage && filteredStageDetails ? (
             <>
               <div className="bg-gradient-to-r from-blue-50 to-purple-50 px-3 py-2 border-b border-gray-200 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-gray-900">
@@ -349,7 +423,7 @@ export function UserFunnel() {
               </div>
               <div className="p-3 space-y-3 max-h-[500px] overflow-y-auto">
                 <div className="grid grid-cols-1 gap-1.5">
-                  {stageDetails.metrics.map((metric, idx) => (
+                  {filteredStageDetails.metrics.map((metric, idx) => (
                     <div
                       key={`${metric.label}-${idx}`}
                       className="p-2 rounded bg-gray-50 border border-gray-100"
@@ -366,12 +440,12 @@ export function UserFunnel() {
                     {stageDetails.listTitle}
                   </h4>
                   <div className="space-y-1">
-                    {stageDetails.listItems.length === 0 ? (
+                    {filteredStageDetails.listItems.length === 0 ? (
                       <p className="text-xs text-gray-500">
                         No data captured for this stage yet.
                       </p>
                     ) : null}
-                    {stageDetails.listItems.map((item, idx) => (
+                    {filteredStageDetails.listItems.map((item, idx) => (
                       <div
                         key={`${item.label}-${idx}`}
                         className="flex justify-between items-center p-1.5 bg-gray-50 rounded text-xs"
@@ -412,7 +486,7 @@ export function UserFunnel() {
                 No country data captured yet.
               </p>
             ) : null}
-            {data?.countrySegments.map((country) => (
+            {filteredCountrySegments.map((country) => (
               <div key={country.name}>
                 <div className="flex justify-between items-center mb-1">
                   <span className="text-xs text-gray-700">{country.name}</span>

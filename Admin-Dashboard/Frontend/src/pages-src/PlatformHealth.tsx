@@ -34,12 +34,11 @@ import type { AdminRealtimeResponse } from "@/lib/admin-types";
 import { useAdminData } from "@/lib/use-admin-data";
 
 export function PlatformHealth() {
-  const { data, loading, error, refresh } = useAdminData<AdminRealtimeResponse>(
-    "/api/admin/realtime",
+  const [dateRange, setDateRange] = useState("7d");
+  const { data, loading, error } = useAdminData<AdminRealtimeResponse>(
+    `/api/admin/realtime?range=${dateRange}`,
     { refreshMs: 30000 },
   );
-  const [dateRange, setDateRange] = useState("24h");
-  const [environment, setEnvironment] = useState("production");
   const [serviceFilter, setServiceFilter] = useState("all");
 
   if (loading && !data) return <PageLoader />;
@@ -128,6 +127,13 @@ export function PlatformHealth() {
     },
     { label: "System Load", value: `${Math.min(100, Math.round((data?.metrics.activeSessions ?? 0) * 8))}%`, color: "text-rose-600" },
   ];
+  const filteredEndpoints = (data?.systemHealth.endpointStatuses ?? []).filter((endpoint) => {
+    if (serviceFilter === "all") return true;
+    const n = endpoint.name.toLowerCase();
+    if (serviceFilter === "chat") return n.includes("chat") || n.includes("session");
+    if (serviceFilter === "admin") return n.includes("admin") || n.includes("api");
+    return true;
+  });
 
   return (
     <div className="space-y-6">
@@ -139,7 +145,7 @@ export function PlatformHealth() {
           </p>
         </div>
         <button
-          onClick={() => void refresh()}
+          onClick={() => window.location.reload()}
           className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
         >
           <RefreshCw className="h-4 w-4" />
@@ -156,23 +162,13 @@ export function PlatformHealth() {
               onChange={(event) => setDateRange(event.target.value)}
               className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700"
             >
-              <option value="1h">Last 1 hour</option>
-              <option value="24h">Last 24 hours</option>
               <option value="7d">Last 7 days</option>
+              <option value="15d">Last 15 days</option>
+              <option value="30d">Last 30 days</option>
             </select>
           </div>
-          <div className="flex items-center gap-2 text-sm text-gray-600">
-            <Server className="h-4 w-4" />
-            <select
-              value={environment}
-              onChange={(event) => setEnvironment(event.target.value)}
-              className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700"
-            >
-              <option value="production">Production</option>
-              <option value="staging">Staging</option>
-              <option value="development">Development</option>
-            </select>
-          </div>
+          {/* Environment filter disabled: realtime endpoint currently serves a single
+              environment snapshot and does not expose environment partitioning. */}
           <div className="flex items-center gap-2 text-sm text-gray-600">
             <Settings className="h-4 w-4" />
             <select
@@ -254,7 +250,7 @@ export function PlatformHealth() {
             <h2 className="text-lg font-semibold text-gray-900">API Endpoint Status</h2>
           </div>
           <div className="space-y-3">
-            {data?.systemHealth.endpointStatuses.map((endpoint) => (
+            {filteredEndpoints.map((endpoint) => (
               <div key={endpoint.name} className="rounded-lg border border-gray-100 p-4">
                 <div className="flex items-center justify-between">
                   <p className="text-sm font-medium text-gray-900">{endpoint.name}</p>

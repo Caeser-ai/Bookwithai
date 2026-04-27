@@ -21,7 +21,7 @@ export function RouteTrends() {
         </div>
         <div className="flex items-center gap-3">
           <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600">Last updated: {data?.generatedLabel ?? "Unavailable"}</div>
-          <button onClick={() => void refresh()} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+          <button onClick={() => window.location.reload()} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
             <RefreshCw className="h-4 w-4" /> Refresh
           </button>
         </div>

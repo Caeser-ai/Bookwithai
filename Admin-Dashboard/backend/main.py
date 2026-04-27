@@ -27,7 +27,7 @@ ALLOWED_ORIGINS: list[str] = (
 
 # In development fall back to the local Next.js dev server only
 if not ALLOWED_ORIGINS:
-    ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000","http://localhost:3001"]
 
 AUTO_CREATE_TABLES = os.getenv("AUTO_CREATE_TABLES", "").strip().lower() in {
     "1",
@@ -109,6 +109,24 @@ def _ensure_monitoring_table() -> None:
             conn.execute(
                 text(
                     """
+                    CREATE TABLE IF NOT EXISTS api_metrics_1m (
+                      bucket_start TIMESTAMP NOT NULL,
+                      method VARCHAR(16) NOT NULL,
+                      path VARCHAR(255) NOT NULL,
+                      provider VARCHAR(64) NOT NULL,
+                      request_count INTEGER NOT NULL DEFAULT 0,
+                      success_count INTEGER NOT NULL DEFAULT 0,
+                      error_count INTEGER NOT NULL DEFAULT 0,
+                      total_latency_ms BIGINT NOT NULL DEFAULT 0,
+                      max_latency_ms INTEGER NOT NULL DEFAULT 0,
+                      PRIMARY KEY (bucket_start, method, path, provider)
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
                     CREATE TABLE IF NOT EXISTS api_key_registry (
                       key_name VARCHAR(128) PRIMARY KEY,
                       provider VARCHAR(64) NOT NULL,
@@ -121,16 +139,35 @@ def _ensure_monitoring_table() -> None:
                     """
                 )
             )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_provider_config (
+                      provider VARCHAR(64) PRIMARY KEY,
+                      quota_daily INTEGER NOT NULL DEFAULT 0,
+                      cost_per_request NUMERIC(12, 6) NOT NULL DEFAULT 0,
+                      currency VARCHAR(8) NOT NULL DEFAULT 'USD',
+                      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_request_logs_created_at ON api_request_logs (created_at)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_request_logs_path ON api_request_logs (path)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_request_logs_status_code ON api_request_logs (status_code)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_key_registry_provider ON api_key_registry (provider)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_key_registry_last_used_at ON api_key_registry (last_used_at)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_provider_config_active ON api_provider_config (is_active)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_metrics_1m_bucket_start ON api_metrics_1m (bucket_start)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_metrics_1m_path ON api_metrics_1m (path)"))
         _MONITORING_TABLE_READY = True
 
 
 def _provider_for_path(path: str) -> str:
     p = (path or "").lower()
+    if p.startswith("/api/admin/"):
+        return "Admin"
     if "/chat" in p or "/ai/" in p:
         return "Chat"
     if "/sessions" in p:
@@ -162,6 +199,7 @@ def _provider_for_path(path: str) -> str:
 
 def _key_name_for_provider(provider: str) -> str:
     mapping = {
+        "Admin": "ADMIN_API_TOKEN",
         "Chat": "OPENAI_API_KEY",
         "Sessions": "SESSION_SERVICE",
         "Trips": "TRIP_SERVICE",
@@ -190,6 +228,9 @@ def _safe_last4(value: str | None) -> str | None:
         cleaned = cleaned[7:].strip()
     if _HASH_RE.match(cleaned):
         return cleaned[-4:]
+    # Keep non-hash secrets masked but still traceable in monitoring.
+    if len(cleaned) >= 8:
+        return cleaned[-4:]
     return None
 
 
@@ -207,10 +248,7 @@ async def api_request_logging(request: Request, call_next) -> Response:
         raise
     finally:
         path = request.url.path or ""
-        if (
-            path.startswith("/api/")
-            and not path.startswith("/api/admin/")
-        ):
+        if path.startswith("/api/"):
             latency_ms = max(int((time.perf_counter() - started) * 1000), 0)
             try:
                 _ensure_monitoring_table()
@@ -251,6 +289,34 @@ async def api_request_logging(request: Request, call_next) -> Response:
                                 "client_ip": (client_ip or "").split(",")[0].strip()[:64] or None,
                                 "user_agent": request.headers.get("user-agent"),
                                 "error_message": error_message,
+                            },
+                        )
+                        db.execute(
+                            text(
+                                """
+                                INSERT INTO api_metrics_1m (
+                                  bucket_start, method, path, provider, request_count,
+                                  success_count, error_count, total_latency_ms, max_latency_ms
+                                ) VALUES (
+                                  date_trunc('minute', NOW()), :method, :path, :provider, 1,
+                                  :success_inc, :error_inc, :latency_ms, :latency_ms
+                                )
+                                ON CONFLICT (bucket_start, method, path, provider)
+                                DO UPDATE SET
+                                  request_count = api_metrics_1m.request_count + 1,
+                                  success_count = api_metrics_1m.success_count + EXCLUDED.success_count,
+                                  error_count = api_metrics_1m.error_count + EXCLUDED.error_count,
+                                  total_latency_ms = api_metrics_1m.total_latency_ms + EXCLUDED.total_latency_ms,
+                                  max_latency_ms = GREATEST(api_metrics_1m.max_latency_ms, EXCLUDED.max_latency_ms)
+                                """
+                            ),
+                            {
+                                "method": request.method,
+                                "path": path,
+                                "provider": provider,
+                                "success_inc": 1 if status_code < 400 else 0,
+                                "error_inc": 1 if status_code >= 400 else 0,
+                                "latency_ms": latency_ms,
                             },
                         )
                         db.execute(
