@@ -75,15 +75,11 @@ function getBackendTimeoutMs(): number {
   return 60_000;
 }
 
-async function parseJson<T>(response: Response): Promise<T | null> {
-  const text = await response.text();
-  if (!text) return null;
-
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    return null;
-  }
+function summarizeText(value: string, limit = 240): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, limit - 3).trimEnd()}...`;
 }
 
 export async function fetchAdminBackend<T>(
@@ -92,6 +88,7 @@ export async function fetchAdminBackend<T>(
 ): Promise<T> {
   const { baseUrl, adminToken } = getBackendConfig();
   const timeoutMs = getBackendTimeoutMs();
+  const requestUrl = buildBackendUrl(baseUrl, path);
   const headers = new Headers(init?.headers);
   headers.set("accept", "application/json");
   headers.set("x-admin-token", adminToken);
@@ -105,13 +102,19 @@ export async function fetchAdminBackend<T>(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    response = await fetch(buildBackendUrl(baseUrl, path), {
+    response = await fetch(requestUrl, {
       ...init,
       headers,
       cache: "no-store",
       signal: controller.signal,
     });
   } catch (error) {
+    console.error("[admin-backend] request failed before response", {
+      path,
+      requestUrl,
+      timeoutMs,
+      error: error instanceof Error ? error.message : String(error),
+    });
     if (error instanceof Error && error.name === "AbortError") {
       throw new AdminBackendError(
         `Admin backend timed out after ${Math.round(timeoutMs / 1000)}s for ${path}.`,
@@ -126,16 +129,42 @@ export async function fetchAdminBackend<T>(
     clearTimeout(timeoutId);
   }
 
-  const payload = await parseJson<{ detail?: string } & T>(response);
+  const responseText = await response.text();
+  let payload: ({ detail?: string } & T) | null = null;
+
+  if (responseText) {
+    try {
+      payload = JSON.parse(responseText) as { detail?: string } & T;
+    } catch {
+      payload = null;
+    }
+  }
 
   if (!response.ok) {
+    const detail = summarizeText(
+      payload?.detail || responseText || `Admin backend request failed with ${response.status}.`,
+    );
+    console.error("[admin-backend] non-ok response", {
+      path,
+      requestUrl,
+      status: response.status,
+      detail,
+      vercelId: response.headers.get("x-vercel-id"),
+    });
     throw new AdminBackendError(
-      payload?.detail || `Admin backend request failed with ${response.status}.`,
+      `Admin backend ${response.status} on ${path}: ${detail}`,
       response.status,
     );
   }
 
   if (!payload) {
+    console.error("[admin-backend] empty or non-json response", {
+      path,
+      requestUrl,
+      status: response.status,
+      bodySnippet: summarizeText(responseText),
+      vercelId: response.headers.get("x-vercel-id"),
+    });
     throw new AdminBackendError("Admin backend returned an empty response.", 502);
   }
 

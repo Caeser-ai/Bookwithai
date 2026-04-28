@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.pool import NullPool
 
 load_dotenv()
 
@@ -25,12 +26,33 @@ CHAT_DATABASE_URL = (
     or DEFAULT_DATABASE_URL
 )
 
-# pool_pre_ping: validate connections before checkout; pool_recycle: avoid stale SSL / NAT timeouts
-_engine_kwargs = {
-    "echo": False,
-    "pool_pre_ping": True,
-    "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "1800")),
-}
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Vercel/serverless instances should not hold onto connection pools between
+# invocations. Supabase session poolers can reject new sessions when many warm
+# lambdas each retain idle pooled connections, so default to NullPool there.
+_db_pool_mode = os.getenv("DB_POOL_MODE", "").strip().lower()
+_use_null_pool = _db_pool_mode == "null" or (
+    _db_pool_mode == "" and _env_flag("VERCEL")
+)
+
+if _use_null_pool:
+    _engine_kwargs = {
+        "echo": False,
+        "poolclass": NullPool,
+    }
+else:
+    # QueuePool is still fine for long-lived local/dev processes.
+    _engine_kwargs = {
+        "echo": False,
+        "pool_pre_ping": True,
+        "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "1800")),
+        "pool_size": int(os.getenv("DB_POOL_SIZE", "5")),
+        "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "10")),
+        "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT", "30")),
+    }
 
 engine_user = (
     create_engine(USER_DATABASE_URL, **_engine_kwargs)

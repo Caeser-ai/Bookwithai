@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import time
@@ -12,6 +13,8 @@ from api.routes import router as api_router
 from sqlalchemy import text
 
 from database import SessionUser, engine_user
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # CORS origins — read from environment so nothing is hardcoded
@@ -245,6 +248,11 @@ async def api_request_logging(request: Request, call_next) -> Response:
         status_code = response.status_code
     except Exception as exc:
         error_message = str(exc)
+        logger.exception(
+            "Unhandled API error on %s %s",
+            request.method,
+            request.url.path,
+        )
         raise
     finally:
         path = request.url.path or ""
