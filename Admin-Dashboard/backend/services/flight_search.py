@@ -71,6 +71,8 @@ class UnifiedSearchParams:
     preference: Optional[str] = None
     preferred_airlines: Optional[List[str]] = None
     excluded_airlines: Optional[List[str]] = None
+    meal_preference: Optional[str] = None
+    seat_preference: Optional[str] = None
     nonstop_only: bool = False
     baggage_required: bool = False
     refundable_only: bool = False
@@ -250,6 +252,13 @@ async def unified_flight_search(params: UnifiedSearchParams) -> Tuple[List[Dict[
             **_fallback_urls,
             "google": serpapi_direct_link or _fallback_urls.get("google", ""),
         }
+        official_booking_url = (
+            serpapi_direct_link
+            or booking_urls.get("google")
+            or booking_urls.get("skyscanner")
+            or booking_urls.get("kayak")
+            or ""
+        )
         adapted.append(
             {
                 "flight_id": flight_id,
@@ -312,6 +321,7 @@ async def unified_flight_search(params: UnifiedSearchParams) -> Tuple[List[Dict[
                 "meal_services": f.get("meal_services") or [],
                 "booking": {
                     "deepLinks": booking_urls,
+                    "officialLink": official_booking_url,
                     # priceVerified=true only when SerpAPI confirmed the price
                     "priceVerified": bool(f.get("price_verified")),
                     "lastCheckedAt": search_checked_at,
@@ -337,6 +347,13 @@ async def unified_flight_search(params: UnifiedSearchParams) -> Tuple[List[Dict[
                     "marketPosition": None,
                     "priceGapFromCheapest": None,
                     "priceGapPercent": None,
+                },
+                "allowances": {
+                    "checkedBaggage": baggage_checked,
+                    "cabinBaggage": baggage_cabin,
+                    "refundable": bool(f.get("refundable")),
+                    "mealServices": f.get("meal_services") or [],
+                    "perks": f.get("perks") or [],
                 },
                 "convenience": {
                     "airportName": None,
@@ -978,6 +995,8 @@ def _build_cache_variant(params: UnifiedSearchParams) -> str:
             for airline in (params.excluded_airlines or [])
             if airline and airline.strip()
         ),
+        "meal_preference": (params.meal_preference or "").strip().lower(),
+        "seat_preference": (params.seat_preference or "").strip().lower(),
         "nonstop_only": params.nonstop_only,
         "baggage_required": params.baggage_required,
         "refundable_only": params.refundable_only,
@@ -1311,11 +1330,27 @@ def _apply_structured_analysis(
         )
         if has_complimentary_meal:
             preference_score += 0.6
+        preferred_meal = (params.meal_preference or "").strip().lower()
+        meal_tokens = " ".join(str(s).lower() for s in (meal_services + perks))
+        meal_preference_matched = None
+        if preferred_meal:
+            meal_preference_matched = preferred_meal in meal_tokens
+            if meal_preference_matched:
+                preference_score += 1.2
+            elif meal_services:
+                preference_score -= 0.6
+            else:
+                preference_score -= 1.0
 
         # Amadeus refundability
         if params.refundable_only:
             refundable = bool(flight.get("refundable"))
             preference_score += 1.0 if refundable else -1.5
+
+        # Seat-side preference typically requires seatmap data. Track intent and
+        # apply only a tiny penalty when no seatmap-backed matching is possible.
+        if (params.seat_preference or "").strip():
+            preference_score -= 0.2
 
         # Slight penalty when price is indicative (Amadeus-only, not confirmed by SerpAPI)
         if not price_verified:
@@ -1343,6 +1378,8 @@ def _apply_structured_analysis(
             "withinBudget": bool(params.budget and safe_price <= params.budget),
             "hasCheckedBaggage": has_checked_baggage,
             "hasComplimentaryMeal": has_complimentary_meal,
+            "mealPreference": params.meal_preference,
+            "mealPreferenceMatched": meal_preference_matched,
             "priceVerified": price_verified,
         }
         flight["score"] = round(overall_score, 1)

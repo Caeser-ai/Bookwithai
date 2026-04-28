@@ -7,6 +7,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
+from sqlalchemy.orm import Session
 
 from services.flight_ai import (
     get_iata,
@@ -14,8 +15,10 @@ from services.flight_ai import (
     present_flight_results,
     should_attempt_flight_search,
 )
+from models.user import TravelPreference
 from services.tools import ToolExecutionContext, ToolRegistry
 from services.tools.convert_currency import ConvertCurrencyTool
+from services.tools.flight_status import FlightStatusTool
 from services.tools.get_user_context import GetUserContextTool
 from services.tools.map_info import GetMapInfoTool
 from services.tools.search_flights import SearchFlightsTool
@@ -36,6 +39,8 @@ _MEAL_RE = re.compile(r"\b(meal|food|snack)\b", re.IGNORECASE)
 _WIFI_RE = re.compile(r"\b(wifi|wi-fi|internet)\b", re.IGNORECASE)
 _WEATHER_RE = re.compile(r"\b(weather|temperature|forecast|rain|snow|humid|sunny)\b", re.IGNORECASE)
 _MAP_RE = re.compile(r"\b(map|directions|airport access|how far|travel time|leave for the airport)\b", re.IGNORECASE)
+_FLIGHT_STATUS_RE = re.compile(r"\b(flight status|status of|track flight|is .* on time|delayed|arrived)\b", re.IGNORECASE)
+_FLIGHT_NUMBER_RE = re.compile(r"\b([A-Z]{2,3}\s?\d{1,4})\b", re.IGNORECASE)
 _COMPARE_RE = re.compile(r"\b(compare|difference|vs|versus)\b", re.IGNORECASE)
 _CURRENCY_RE = re.compile(r"\b(convert|conversion|in|into|price in|show in|currency)\b", re.IGNORECASE)
 _INCLUDE_AIRLINE_RE = re.compile(r"\b(only|just|with|include|including|prefer)\b", re.IGNORECASE)
@@ -90,6 +95,111 @@ _CURRENCY_NAME_TO_CODE = {
 }
 
 
+def _message_mentions_cabin_preference(message: str) -> bool:
+    normalized = (message or "").lower()
+    return any(
+        term in normalized
+        for term in (
+            "economy",
+            "premium economy",
+            "premium-economy",
+            "business",
+            "first class",
+            "first-class",
+            "first",
+        )
+    )
+
+
+def _message_mentions_layover_preference(message: str) -> bool:
+    normalized = (message or "").lower()
+    return any(
+        term in normalized
+        for term in (
+            "nonstop",
+            "non-stop",
+            "direct flight",
+            "direct flights",
+            "1 stop",
+            "one stop",
+            "2 stops",
+            "two stops",
+            "layover",
+        )
+    )
+
+
+def _load_travel_preference(db: Session | None, user_id: str | None) -> TravelPreference | None:
+    if not db or not user_id:
+        return None
+    try:
+        return (
+            db.query(TravelPreference)
+            .filter(TravelPreference.user_id == user_id)
+            .order_by(TravelPreference.updated_at.desc())
+            .first()
+        )
+    except Exception:
+        return None
+
+
+def _apply_profile_preferences_to_search(
+    search: Dict[str, Any],
+    travel_preference: TravelPreference | None,
+    message: str,
+) -> Dict[str, Any]:
+    if not travel_preference:
+        return search
+
+    preferences = search.setdefault("preferences", {})
+    constraints = search.setdefault("constraints", {})
+    saved_cabin = (getattr(travel_preference, "cabin_class", None) or "").strip().lower()
+    preferred_airlines = getattr(travel_preference, "preferred_airlines", None) or []
+    airport_preference = getattr(travel_preference, "airport_preference", None) or []
+    layover_preference = (getattr(travel_preference, "layover_preference", None) or "").strip()
+    flight_timing = getattr(travel_preference, "flight_timing", None) or []
+    travel_style = (getattr(travel_preference, "travel_style", None) or "").strip()
+    meal_preference = (getattr(travel_preference, "meal_preference", None) or "").strip()
+    seat_preference = (getattr(travel_preference, "seat_preference", None) or "").strip()
+
+    if not _message_mentions_cabin_preference(message):
+        cabin_map = {
+            "economy": "economy",
+            "premium economy": "premium economy",
+            "business": "business",
+            "first": "first",
+        }
+        if saved_cabin in cabin_map:
+            search["cabin_class"] = cabin_map[saved_cabin]
+
+    if not preferences.get("preferred_airlines") and preferred_airlines:
+        preferences["preferred_airlines"] = preferred_airlines
+
+    if not preferences.get("airport_preference") and airport_preference:
+        preferences["airport_preference"] = airport_preference
+
+    if not constraints.get("nonstop_only") and not _message_mentions_layover_preference(message):
+        if layover_preference == "Direct flights only":
+            constraints["nonstop_only"] = True
+
+    if not preferences.get("time_window") and flight_timing:
+        preferences["time_window"] = ", ".join(flight_timing)
+
+    if not preferences.get("meal_preference") and meal_preference:
+        preferences["meal_preference"] = meal_preference
+
+    if not preferences.get("seat_preference") and seat_preference:
+        preferences["seat_preference"] = seat_preference
+
+    if not preferences.get("ranking_goal"):
+        if travel_style == "Budget Optimized":
+            preferences["ranking_goal"] = "cheapest"
+        elif travel_style == "Comfort Optimized":
+            preferences["ranking_goal"] = "best_overall"
+
+    return search
+
+
 def _build_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(GetUserContextTool())
@@ -97,6 +207,7 @@ def _build_registry() -> ToolRegistry:
     registry.register(GetWeatherTool())
     registry.register(GetMapInfoTool())
     registry.register(ConvertCurrencyTool())
+    registry.register(FlightStatusTool())
     return registry
 
 
@@ -275,6 +386,8 @@ def _build_search_payload(search: Dict[str, Any], user_lat: float | None, user_l
         "ranking_goal": ((search.get("preferences") or {}).get("ranking_goal")),
         "preferred_airlines": ((search.get("preferences") or {}).get("preferred_airlines") or []),
         "excluded_airlines": ((search.get("preferences") or {}).get("excluded_airlines") or []),
+        "meal_preference": ((search.get("preferences") or {}).get("meal_preference")),
+        "seat_preference": ((search.get("preferences") or {}).get("seat_preference")),
         "nonstop_only": bool((search.get("constraints") or {}).get("nonstop_only")),
         "baggage_required": bool((search.get("constraints") or {}).get("baggage_required")),
         "refundable_only": bool((search.get("constraints") or {}).get("refundable_only")),
@@ -458,6 +571,13 @@ def _build_planner_trace(planned_tools: List[str]) -> Dict[str, Any]:
     }
 
 
+def _extract_flight_number(message: str) -> Optional[str]:
+    match = _FLIGHT_NUMBER_RE.search(message or "")
+    if not match:
+        return None
+    return re.sub(r"\s+", "", match.group(1).upper())
+
+
 async def plan_chat_response(
     *,
     message: str,
@@ -482,6 +602,25 @@ async def plan_chat_response(
         for flight in (recent_flights or [])
         if isinstance(flight, dict)
     ]
+
+    if _FLIGHT_STATUS_RE.search(message):
+        flight_number = _extract_flight_number(message)
+        if flight_number:
+            planned_tools.append("flight_status")
+            status_result = await registry.execute_async(
+                "flight_status",
+                {"flight_number": flight_number},
+                _context_with_trace(user_context, planned_tools),
+                timeout_seconds=DEFAULT_TOOL_TIMEOUT_SECONDS,
+                max_retries=DEFAULT_TOOL_RETRIES,
+            )
+            if status_result.status.value == "success":
+                return {
+                    "type": "text",
+                    "text": status_result.data.get("status_text") or f"I couldn't find status details for {flight_number}.",
+                    "session_id": user_context.session_id,
+                    "planner_trace": _build_planner_trace(planned_tools),
+                }
 
     if normalized_recent_flights:
         selected_indices = _extract_selected_indices(message)
@@ -673,6 +812,11 @@ async def plan_chat_response(
                 }
 
             search = intent_result.get("search") or {}
+            search = _apply_profile_preferences_to_search(
+                search,
+                _load_travel_preference(user_context.user_db, user_context.user_id),
+                message,
+            )
             planned_tools.append("search_flights")
             search_result = await registry.execute_async(
                 "search_flights",

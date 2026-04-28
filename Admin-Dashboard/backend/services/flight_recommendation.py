@@ -279,6 +279,7 @@ def _rule_based_pros_cons(
     comparison = flight.get("comparison") or {}
     convenience = flight.get("convenience") or {}
     operations = flight.get("operations") or {}
+    allowances = flight.get("allowances") or {}
 
     pros: List[str] = []
     cons: List[str] = []
@@ -319,6 +320,34 @@ def _rule_based_pros_cons(
     duration = flight.get("duration")
     if duration:
         pros.append(f"{duration} total journey")
+
+    has_checked_baggage = bool(
+        ((flight.get("baggage") or {}).get("checked"))
+        or flight.get("baggage_checked")
+        or allowances.get("checkedBaggage")
+    )
+    if has_checked_baggage:
+        pros.append("Checked baggage included")
+    else:
+        cons.append("Checked baggage not clearly included")
+
+    meal_services = (
+        flight.get("meal_services")
+        or allowances.get("mealServices")
+        or []
+    )
+    if meal_services:
+        pros.append("Meal service available")
+
+    perks = flight.get("perks") or allowances.get("perks") or []
+    if any("wifi" in str(perk).lower() or "wi-fi" in str(perk).lower() for perk in perks):
+        pros.append("In-flight Wi-Fi available")
+
+    refundable = flight.get("refundable")
+    if refundable is True:
+        pros.append("Refundable fare")
+    elif refundable is False:
+        cons.append("Non-refundable fare")
 
     if budget and float(flight.get("price") or 0) > budget:
         cons.append("Over budget")

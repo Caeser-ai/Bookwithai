@@ -2,7 +2,9 @@
 
 import os
 import re
+import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
@@ -12,6 +14,8 @@ load_dotenv()
 
 AEROAPI_BASE = "https://aeroapi.flightaware.com/aeroapi"
 FLIGHTAWARE_API_KEY = os.getenv("FLIGHTAWARE_API_KEY", "")
+FLIGHT_STATUS_CACHE_TTL_SECONDS = max(int(os.getenv("FLIGHT_STATUS_CACHE_TTL_SECONDS", "600")), 30)
+_status_cache: dict[str, tuple[float, str]] = {}
 
 
 def _normalize_ident(flight_number: str) -> str:
@@ -276,8 +280,41 @@ async def get_flight_status(flight_number: str) -> str:
     Fetch flight status from FlightAware and return a human-readable string for chat.
     """
     ident = _normalize_ident(flight_number)
+    now_ts = datetime.utcnow().timestamp()
+    cached = _status_cache.get(ident)
+    if cached and cached[0] > now_ts:
+        return cached[1]
+
+    def _cache_and_return(value: str) -> str:
+        _status_cache[ident] = (now_ts + FLIGHT_STATUS_CACHE_TTL_SECONDS, value)
+        return value
+
+    def _sample_status_from_fixture() -> Optional[str]:
+        fixture_dir = Path(__file__).resolve().parents[3] / "api_json_test" / "outputs"
+        preferred = fixture_dir / f"flightaware_flights_{ident}.json"
+        candidate_files = [preferred, fixture_dir / "flightaware_flights_AI101.json", fixture_dir / "flightaware_flight.json"]
+        for candidate in candidate_files:
+            if not candidate.exists():
+                continue
+            try:
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+                flights = (((payload.get("response") or {}).get("body") or {}).get("flights") or [])
+                if not flights:
+                    continue
+                return "\n\n".join(_format_flight_for_status(f) for f in flights[:3])
+            except Exception:
+                continue
+        return None
+
     if not FLIGHTAWARE_API_KEY:
-        return f"Flight verification is not configured (missing FLIGHTAWARE_API_KEY). Ident: {ident}."
+        sample = _sample_status_from_fixture()
+        if sample:
+            return _cache_and_return(
+                f"Live FlightAware key is not configured, so I am using cached fixture data.\n\n{sample}"
+            )
+        return _cache_and_return(
+            f"Flight verification is not configured (missing FLIGHTAWARE_API_KEY). Ident: {ident}."
+        )
 
     url = f"{AEROAPI_BASE}/flights/{ident}"
     headers = {"x-apikey": FLIGHTAWARE_API_KEY}
@@ -286,14 +323,19 @@ async def get_flight_status(flight_number: str) -> str:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 404:
-                return f"No flight information found for {ident}."
+                return _cache_and_return(f"No flight information found for {ident}.")
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPError as e:
-        return f"I couldn't look up that flight: {e}."
+        sample = _sample_status_from_fixture()
+        if sample:
+            return _cache_and_return(
+                f"I couldn't reach live FlightAware just now, so here is cached fixture data.\n\n{sample}"
+            )
+        return _cache_and_return(f"I couldn't look up that flight: {e}.")
 
     flights = data.get("flights") or []
     if not flights:
-        return f"No flight information found for {ident}."
+        return _cache_and_return(f"No flight information found for {ident}.")
 
-    return "\n\n".join(_format_flight_for_status(f) for f in flights[:3])
+    return _cache_and_return("\n\n".join(_format_flight_for_status(f) for f in flights[:3]))

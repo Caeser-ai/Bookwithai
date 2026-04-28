@@ -1103,6 +1103,52 @@ async def chat_endpoint(
     history = [{"role": h.role, "content": h.content} for h in request.history]
     sid = request.session_id
 
+    def merge_recent_session_history() -> None:
+        nonlocal history
+        if not sid:
+            return
+        try:
+            sid_uuid = uuid.UUID(str(sid))
+        except Exception:
+            return
+
+        db_rows = (
+            db.query(ChatMessage)
+            .filter(ChatMessage.session_id == sid_uuid)
+            .order_by(ChatMessage.created_at.desc())
+            .limit(10)
+            .all()
+        )
+        if not db_rows:
+            return
+
+        db_history = [
+            {"role": (row.role or "").strip().lower(), "content": row.content or ""}
+            for row in reversed(db_rows)
+            if (row.role or "").strip().lower() in {"user", "assistant"}
+            and (row.content or "").strip()
+        ]
+        if not db_history:
+            return
+
+        merged = db_history + history
+        deduped: List[Dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in merged:
+            key = (
+                (item.get("role") or "").strip().lower(),
+                (item.get("content") or "").strip(),
+            )
+            if not key[0] or not key[1]:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append({"role": key[0], "content": key[1]})
+        history = deduped[-12:]
+
+    merge_recent_session_history()
+
     if user_id:
         if sid:
             session = get_session(db, sid, user_id=user_id)
@@ -1870,6 +1916,14 @@ async def chat_endpoint(
                 return response
 
     recent_flights: List[Dict[str, Any]] = request.recent_flights or []
+    cached_session_response = _find_cached_session_reply(db, sid, msg)
+    if cached_session_response:
+        cached_session_response["session_id"] = sid
+        cache_meta = cached_session_response.setdefault("meta", {})
+        if isinstance(cache_meta, dict):
+            cache_meta.setdefault("cache_hit", "session_response_reuse")
+        persist_chat_exchange(cached_session_response)
+        return cached_session_response
 
     planned_response = await plan_chat_response(
         message=msg,
@@ -3011,6 +3065,85 @@ def _first_list_value(value: Any, fallback: str = "Unknown") -> str:
                 return normalized
         return fallback
     return _normalize_admin_label(value, fallback)
+
+
+def _normalize_chat_query(value: str) -> str:
+    return re.sub(r"[^a-z0-9\s]+", " ", (value or "").lower()).strip()
+
+
+def _chat_tokens(value: str) -> set[str]:
+    normalized = _normalize_chat_query(value)
+    return {token for token in normalized.split() if token}
+
+
+def _is_near_same_intent(current: str, candidate: str) -> bool:
+    norm_current = _normalize_chat_query(current)
+    norm_candidate = _normalize_chat_query(candidate)
+    if not norm_current or not norm_candidate:
+        return False
+    if norm_current == norm_candidate:
+        return True
+    if norm_current in norm_candidate or norm_candidate in norm_current:
+        return True
+
+    tokens_current = _chat_tokens(current)
+    tokens_candidate = _chat_tokens(candidate)
+    if not tokens_current or not tokens_candidate:
+        return False
+
+    intersection = len(tokens_current.intersection(tokens_candidate))
+    union = len(tokens_current.union(tokens_candidate))
+    if union == 0:
+        return False
+    return (intersection / union) >= 0.72
+
+
+def _find_cached_session_reply(
+    db: Session,
+    session_id: Optional[str],
+    message: str,
+) -> Optional[Dict[str, Any]]:
+    if not session_id or not (message or "").strip():
+        return None
+    try:
+        session_uuid = uuid.UUID(str(session_id))
+    except Exception:
+        return None
+
+    rows = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.session_id == session_uuid)
+        .order_by(ChatMessage.created_at.asc())
+        .all()
+    )
+    if len(rows) < 2:
+        return None
+
+    for index in range(len(rows) - 2, -1, -1):
+        user_msg = rows[index]
+        if (user_msg.role or "").strip().lower() != "user":
+            continue
+        if not _is_near_same_intent(message, user_msg.content or ""):
+            continue
+
+        for follow_index in range(index + 1, len(rows)):
+            assistant_msg = rows[follow_index]
+            role = (assistant_msg.role or "").strip().lower()
+            if role == "user":
+                break
+            if role != "assistant":
+                continue
+
+            payload = assistant_msg.metadata_ if isinstance(assistant_msg.metadata_, dict) else None
+            if payload:
+                cloned = dict(payload)
+                cloned.setdefault("text", assistant_msg.content or "")
+                return cloned
+            return {
+                "type": "text",
+                "text": assistant_msg.content or "",
+            }
+    return None
 
 
 def _is_search_message(message: ChatMessage) -> bool:

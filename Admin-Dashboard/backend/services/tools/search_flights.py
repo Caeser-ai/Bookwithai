@@ -21,12 +21,16 @@ class SearchFlightsInput(BaseModel):
     ranking_goal: str | None = None
     preferred_airlines: list[str] = Field(default_factory=list)
     excluded_airlines: list[str] = Field(default_factory=list)
+    meal_preference: str | None = None
+    seat_preference: str | None = None
     nonstop_only: bool = False
     baggage_required: bool = False
     refundable_only: bool = False
     user_lat: float | None = None
     user_lng: float | None = None
-    max_results: int = Field(default=10, ge=1, le=15)
+    # Number of flights to return in the compact display list.
+    # Full fetched set is returned separately for follow-up reasoning.
+    max_results: int = Field(default=5, ge=1, le=15)
 
 
 class SearchFlightsTool(AsyncBaseTool[SearchFlightsInput]):
@@ -52,6 +56,8 @@ class SearchFlightsTool(AsyncBaseTool[SearchFlightsInput]):
                 preference=payload.ranking_goal,
                 preferred_airlines=payload.preferred_airlines,
                 excluded_airlines=payload.excluded_airlines,
+                meal_preference=payload.meal_preference,
+                seat_preference=payload.seat_preference,
                 nonstop_only=payload.nonstop_only,
                 baggage_required=payload.baggage_required,
                 refundable_only=payload.refundable_only,
@@ -60,10 +66,12 @@ class SearchFlightsTool(AsyncBaseTool[SearchFlightsInput]):
             )
         )
 
-        limited = flights[: payload.max_results]
+        display = flights[: payload.max_results]
         return {
-            "flights": limited,
-            "display_flights": limited[:5],
+            # Keep full fetched records in context so follow-up prompts
+            # (cheapest/expensive/latest/etc.) can reuse data without refetch.
+            "flights": flights,
+            "display_flights": display,
             "search_info": search_info,
             "search": {
                 "origin": payload.origin,
