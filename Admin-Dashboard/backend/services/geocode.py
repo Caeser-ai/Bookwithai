@@ -4,6 +4,8 @@ import os
 import httpx
 from dotenv import load_dotenv
 
+from services.external_api_monitoring import monitored_httpx_request
+
 load_dotenv()
 
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "")
@@ -24,7 +26,14 @@ async def reverse_geocode(lat: float, lng: float) -> str | None:
 
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(url)
+            resp = await monitored_httpx_request(
+                client,
+                provider="OpenWeather",
+                path="/external/openweather/reverse-geocode",
+                method="GET",
+                url=url,
+                query_params={"lat": lat, "lng": lng},
+            )
             resp.raise_for_status()
             data = resp.json()
             if data and len(data) > 0:

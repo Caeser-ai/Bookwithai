@@ -32,6 +32,8 @@ import {
     ChevronDown
 } from "lucide-react";
 import { useState } from "react";
+import { useAdminData } from "@/lib/use-admin-data";
+import type { AdminAuthMeResponse } from "@/lib/admin-types";
 
 const menuItems = [
     { path: "/", label: "Overview", icon: LayoutDashboard, exact: true },
@@ -72,10 +74,30 @@ interface DashboardLayoutProps {
 }
 
 export function DashboardLayout({ children }: DashboardLayoutProps) {
+    const pathname = usePathname();
+    if (pathname === "/sign-in") {
+        return <>{children}</>;
+    }
+
+    return <DashboardShell>{children}</DashboardShell>;
+}
+
+function initialsFromName(value: string | null | undefined) {
+    const parts = (value ?? "").trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return "SA";
+    return parts.slice(0, 2).map((part) => part[0]?.toUpperCase() ?? "").join("");
+}
+
+function DashboardShell({ children }: DashboardLayoutProps) {
     const [selectedRange, setSelectedRange] = useState("7 Days");
     const [expandedSections, setExpandedSections] = useState<string[]>(["Feedback & Support"]);
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const pathname = usePathname();
+    const adminSession = useAdminData<AdminAuthMeResponse>("/api/admin/auth/me", { staleMs: 60_000 });
+    const admin = adminSession.data?.admin;
+    const adminName = admin?.fullName || "Super Admin";
+    const adminSubLabel = admin?.username ? `@${admin.username}` : admin?.email || "super_admin";
+    const adminInitials = initialsFromName(adminName);
 
     const toggleSection = (label: string) => {
         setExpandedSections(prev =>
@@ -253,15 +275,18 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
                             </button>
 
                             {/* Profile Avatar */}
-                            <div className="hidden md:flex items-center gap-3 pl-3 border-l border-gray-200">
+                            <Link
+                                href="/settings"
+                                className="hidden md:flex items-center gap-3 pl-3 border-l border-gray-200 hover:opacity-90 transition-opacity"
+                            >
                                 <div className="text-right">
-                                    <div className="text-sm font-medium text-gray-900">Admin User</div>
-                                    <div className="text-xs text-gray-500">admin@bookwithai.com</div>
+                                    <div className="text-sm font-medium text-gray-900">{adminName}</div>
+                                    <div className="text-xs text-gray-500">{adminSubLabel}</div>
                                 </div>
                                 <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center text-white font-medium">
-                                    AU
+                                    {adminInitials}
                                 </div>
-                            </div>
+                            </Link>
                         </div>
                     </div>
                 </header>

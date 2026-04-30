@@ -23,6 +23,7 @@ class SearchFlightsInput(BaseModel):
     excluded_airlines: list[str] = Field(default_factory=list)
     meal_preference: str | None = None
     seat_preference: str | None = None
+    time_window: str | None = None
     nonstop_only: bool = False
     baggage_required: bool = False
     refundable_only: bool = False
@@ -58,6 +59,7 @@ class SearchFlightsTool(AsyncBaseTool[SearchFlightsInput]):
                 excluded_airlines=payload.excluded_airlines,
                 meal_preference=payload.meal_preference,
                 seat_preference=payload.seat_preference,
+                time_window=payload.time_window,
                 nonstop_only=payload.nonstop_only,
                 baggage_required=payload.baggage_required,
                 refundable_only=payload.refundable_only,
@@ -83,6 +85,7 @@ class SearchFlightsTool(AsyncBaseTool[SearchFlightsInput]):
                 "cabin_class": payload.cabin_class,
                 "preferred_airlines": payload.preferred_airlines,
                 "excluded_airlines": payload.excluded_airlines,
+                "time_window": payload.time_window,
                 "nonstop_only": payload.nonstop_only,
                 "baggage_required": payload.baggage_required,
                 "refundable_only": payload.refundable_only,

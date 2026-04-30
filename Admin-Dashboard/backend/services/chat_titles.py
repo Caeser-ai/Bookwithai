@@ -6,6 +6,8 @@ from typing import Iterable, Mapping
 
 from openai import OpenAI
 
+from services.external_api_monitoring import monitored_openai_chat_completion
+
 
 TITLE_MODEL = os.getenv("OPENAI_CHAT_TITLE_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -105,7 +107,9 @@ def generate_chat_title(messages: Iterable[Mapping[str, str]]) -> str:
     )
 
     try:
-        response = client.chat.completions.create(
+        response = monitored_openai_chat_completion(
+            client,
+            path="/external/openai/chat-title",
             model=TITLE_MODEL,
             temperature=0.2,
             max_completion_tokens=24,

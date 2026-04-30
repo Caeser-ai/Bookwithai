@@ -1388,7 +1388,7 @@ export async function getBehaviorPageData(rangeDays = 7): Promise<AdminBehaviorP
 }
 
 export async function getApiMonitoringData(rangeDays = 7): Promise<AdminApiMonitoringResponse> {
-  return withServerCache(`admin:api-monitoring:v1:${rangeDays}`, async () => {
+  return withServerCache(`admin:api-monitoring:v2:${rangeDays}`, async () => {
     const payload = await getAdminApiMonitoring(rangeDays);
     const generatedDate = parseISO(payload.generated_at);
     const sparkline = payload.request_volume.slice(-7).map((row) => ({
@@ -1396,14 +1396,53 @@ export async function getApiMonitoringData(rangeDays = 7): Promise<AdminApiMonit
       value: row.requests,
     }));
     const providerColors = ["#3B82F6", "#8B5CF6", "#10B981", "#F59E0B", "#EC4899", "#06B6D4"];
-    const providerUsage = payload.provider_usage.map((item, index) => ({
+    const externalProviderMeta: Record<string, { label: string; description: string }> = {
+      OpenAI: {
+        label: "OpenAI",
+        description: "Chat, ranking, title, tip, and structured AI generation calls.",
+      },
+      Amadeus: {
+        label: "Amadeus",
+        description: "Flight offers, live pricing checks, and seatmap lookups.",
+      },
+      SerpAPI: {
+        label: "SerpAPI",
+        description: "Google Flights search requests for live fare discovery.",
+      },
+      FlightAware: {
+        label: "FlightAware",
+        description: "Flight verification and live status tracking requests.",
+      },
+      OpenWeather: {
+        label: "Weather API",
+        description: "Current weather, forecast, and reverse geocoding lookups.",
+      },
+      "Google Maps": {
+        label: "Map API",
+        description: "Distance Matrix requests used for airport access scoring.",
+      },
+    };
+    const externalProviderUsage = (payload.external_provider_usage ?? []).map((item, index) => ({
       ...item,
+      label: externalProviderMeta[item.provider]?.label ?? item.provider,
+      description: externalProviderMeta[item.provider]?.description ?? "External provider usage.",
       color: providerColors[index % providerColors.length],
     }));
+    const providerUsage =
+      externalProviderUsage.length > 0
+        ? externalProviderUsage.map((item) => ({
+            provider: item.label,
+            requests: item.requestsWindow,
+            color: item.color,
+          }))
+        : payload.provider_usage.map((item, index) => ({
+            ...item,
+            color: providerColors[index % providerColors.length],
+          }));
     const kpis: AdminApiMonitoringResponse["kpis"] = [
       {
         id: "requests",
-        label: "Total API Requests",
+        label: "Total External Requests",
         value: `${(payload.totals.total_requests / 1000).toFixed(1)}K`,
         change: payload.totals.total_requests > 0 ? "+live" : "0%",
         trend: "up",
@@ -1430,7 +1469,7 @@ export async function getApiMonitoringData(rangeDays = 7): Promise<AdminApiMonit
       },
       {
         id: "endpoints",
-        label: "Active Endpoints",
+        label: "Active External Endpoints",
         value: `${payload.totals.active_endpoints}/${payload.totals.total_endpoints}`,
         change: "live",
         trend: "flat",
@@ -1453,7 +1492,7 @@ export async function getApiMonitoringData(rangeDays = 7): Promise<AdminApiMonit
       activeAlerts.push({
         id: "latency-alert",
         type: "warning",
-        title: "High API latency detected",
+        title: "High external API latency detected",
         message: `Current average latency is ${payload.totals.avg_latency_ms}ms (target < 300ms).`,
         time: "just now",
       });
@@ -1462,7 +1501,7 @@ export async function getApiMonitoringData(rangeDays = 7): Promise<AdminApiMonit
       activeAlerts.push({
         id: "error-alert",
         type: "error",
-        title: "Elevated API error rate",
+        title: "Elevated external API error rate",
         message: `Error rate is ${payload.totals.error_rate_pct}% in the last 24h.`,
         time: "just now",
       });
@@ -1485,6 +1524,7 @@ export async function getApiMonitoringData(rangeDays = 7): Promise<AdminApiMonit
       requestVolume: payload.request_volume,
       errorRateTrend: payload.error_rate_trend,
       providerUsage,
+      externalProviderUsage,
       successFailed: payload.success_failed,
       apiKeys: payload.api_keys.map((row) => ({
         ...row,

@@ -8,6 +8,8 @@ from collections import deque
 
 from openai import OpenAI
 
+from services.external_api_monitoring import monitored_openai_chat_completion
+
 TIP_MODEL = os.getenv("OPENAI_TRAVEL_TIP_MODEL", os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -66,7 +68,9 @@ def generate_travel_tip() -> str:
     today = datetime.utcnow().strftime("%Y-%m-%d")
 
     try:
-        response = client.chat.completions.create(
+        response = monitored_openai_chat_completion(
+            client,
+            path="/external/openai/travel-tip",
             model=TIP_MODEL,
             temperature=0.9,
             max_completion_tokens=40,

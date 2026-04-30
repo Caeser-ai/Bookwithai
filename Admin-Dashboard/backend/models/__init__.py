@@ -12,6 +12,7 @@ from models.consent import ConsentRecord
 from models.feedback import Feedback
 from models.otp import SignupOTP
 from models.api_monitoring import ApiRequestLog
+from models.admin_user import AdminUser
 
 __all__ = [
     "BaseUser",
@@ -32,4 +33,5 @@ __all__ = [
     "Feedback",
     "SignupOTP",
     "ApiRequestLog",
+    "AdminUser",
 ]

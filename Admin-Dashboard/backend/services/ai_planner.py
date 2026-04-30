@@ -15,6 +15,7 @@ from services.flight_ai import (
     present_flight_results,
     should_attempt_flight_search,
 )
+from services.external_api_monitoring import monitored_openai_chat_completion
 from models.user import TravelPreference
 from services.tools import ToolExecutionContext, ToolRegistry
 from services.tools.convert_currency import ConvertCurrencyTool
@@ -316,6 +317,34 @@ def _extract_goal(message: str) -> str:
     return "best"
 
 
+def _extract_time_window_preference(message: str) -> str | None:
+    lowered = (message or "").lower()
+    if "morning" in lowered or "early flight" in lowered:
+        return "morning"
+    if "afternoon" in lowered or "midday" in lowered:
+        return "afternoon"
+    if "evening" in lowered:
+        return "evening"
+    if "night" in lowered or "late flight" in lowered or "overnight" in lowered or "red-eye" in lowered:
+        return "night"
+    return None
+
+
+def _departure_bucket(value: Any) -> str | None:
+    raw = str(value or "")
+    match = re.search(r"(?:T|\b)(\d{2}):(\d{2})", raw)
+    if not match:
+        return None
+    hours = int(match.group(1))
+    if 5 <= hours < 12:
+        return "morning"
+    if 12 <= hours < 17:
+        return "afternoon"
+    if 17 <= hours < 21:
+        return "evening"
+    return "night"
+
+
 def _sort_flights_for_goal(
     flights: List[Dict[str, Any]],
     goal: str,
@@ -323,6 +352,7 @@ def _sort_flights_for_goal(
 ) -> List[Dict[str, Any]]:
     filtered = list(flights)
     lowered = (message or "").lower()
+    preferred_time_window = _extract_time_window_preference(message)
 
     if _NONSTOP_RE.search(lowered):
         nonstop = [flight for flight in filtered if int(flight.get("stops") or 0) == 0]
@@ -349,6 +379,14 @@ def _sort_flights_for_goal(
         ]
         if wifi:
             filtered = wifi
+
+    if preferred_time_window:
+        matching_time_window = [
+            flight for flight in filtered
+            if _departure_bucket(flight.get("departure_at") or flight.get("departure_time")) == preferred_time_window
+        ]
+        if matching_time_window:
+            filtered = matching_time_window
 
     if goal == "cheapest":
         return sorted(filtered, key=_safe_price)
@@ -386,6 +424,7 @@ def _build_search_payload(search: Dict[str, Any], user_lat: float | None, user_l
         "ranking_goal": ((search.get("preferences") or {}).get("ranking_goal")),
         "preferred_airlines": ((search.get("preferences") or {}).get("preferred_airlines") or []),
         "excluded_airlines": ((search.get("preferences") or {}).get("excluded_airlines") or []),
+        "time_window": ((search.get("preferences") or {}).get("time_window")),
         "meal_preference": ((search.get("preferences") or {}).get("meal_preference")),
         "seat_preference": ((search.get("preferences") or {}).get("seat_preference")),
         "nonstop_only": bool((search.get("constraints") or {}).get("nonstop_only")),
@@ -393,7 +432,7 @@ def _build_search_payload(search: Dict[str, Any], user_lat: float | None, user_l
         "refundable_only": bool((search.get("constraints") or {}).get("refundable_only")),
         "user_lat": user_lat,
         "user_lng": user_lng,
-        "max_results": 10,
+        "max_results": 5,
     }
 
 
@@ -555,7 +594,9 @@ def _grounded_flights_reply(
             "Try asking for the cheapest, fastest, nonstop, weather, or airport access."
         )
 
-    response = _client.chat.completions.create(
+    response = monitored_openai_chat_completion(
+        _client,
+        path="/external/openai/grounded-chat",
         model=GROUNDED_CHAT_MODEL,
         messages=_build_grounded_messages(message, flights[:8], weather, map_info),
         temperature=0.1,

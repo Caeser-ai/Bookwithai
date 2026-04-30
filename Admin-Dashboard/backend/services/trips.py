@@ -13,6 +13,7 @@ from openai import OpenAI
 from sqlalchemy.orm import Session
 
 from models.trip import Trip
+from services.external_api_monitoring import monitored_openai_chat_completion
 
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -459,7 +460,9 @@ def _parse_ai_trip_patch(trip: Trip | None, instruction: str) -> dict[str, Any]:
     }
 
     try:
-        response = client.chat.completions.create(
+        response = monitored_openai_chat_completion(
+            client,
+            path="/external/openai/trip-patch",
             model=TRIP_EDIT_MODEL if trip is not None else TRIP_CREATE_MODEL,
             temperature=0.1,
             max_completion_tokens=320,

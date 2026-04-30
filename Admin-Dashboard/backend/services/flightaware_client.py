@@ -10,6 +10,8 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 from dotenv import load_dotenv
 
+from services.external_api_monitoring import monitored_httpx_request
+
 load_dotenv()
 
 AEROAPI_BASE = "https://aeroapi.flightaware.com/aeroapi"
@@ -187,7 +189,20 @@ async def get_flight_details(
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, headers=headers)
+            resp = await monitored_httpx_request(
+                client,
+                provider="FlightAware",
+                path="/external/flightaware/flight-details",
+                method="GET",
+                url=url,
+                headers=headers,
+                query_params={
+                    "ident": ident,
+                    "expected_origin": expected_origin,
+                    "expected_destination": expected_destination,
+                    "expected_depart_date": expected_depart_date,
+                },
+            )
             if resp.status_code == 404:
                 return {
                     "ident": ident,
@@ -321,7 +336,15 @@ async def get_flight_status(flight_number: str) -> str:
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, headers=headers)
+            resp = await monitored_httpx_request(
+                client,
+                provider="FlightAware",
+                path="/external/flightaware/flight-status",
+                method="GET",
+                url=url,
+                headers=headers,
+                query_params={"ident": ident},
+            )
             if resp.status_code == 404:
                 return _cache_and_return(f"No flight information found for {ident}.")
             resp.raise_for_status()

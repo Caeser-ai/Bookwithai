@@ -8,6 +8,8 @@ from urllib.parse import quote
 import httpx
 from dotenv import load_dotenv
 
+from services.external_api_monitoring import monitored_httpx_request
+
 load_dotenv()
 
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
@@ -180,14 +182,23 @@ async def get_airport_convenience(
 
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(
-                "https://maps.googleapis.com/maps/api/distancematrix/json",
-                params={
-                    "origins": f"{user_lat},{user_lng}",
-                    "destinations": f"{airport_info['lat']},{airport_info['lng']}",
+            params = {
+                "origins": f"{user_lat},{user_lng}",
+                "destinations": f"{airport_info['lat']},{airport_info['lng']}",
+                "mode": "driving",
+                "units": "metric",
+                "key": GOOGLE_MAPS_API_KEY,
+            }
+            resp = await monitored_httpx_request(
+                client,
+                provider="Google Maps",
+                path="/external/google-maps/distance-matrix",
+                method="GET",
+                url="https://maps.googleapis.com/maps/api/distancematrix/json",
+                params=params,
+                query_params={
+                    "origin_iata": origin_iata.upper(),
                     "mode": "driving",
-                    "units": "metric",
-                    "key": GOOGLE_MAPS_API_KEY,
                 },
             )
             resp.raise_for_status()

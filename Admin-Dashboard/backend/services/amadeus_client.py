@@ -8,6 +8,7 @@ import httpx
 from dateutil import parser as date_parser
 from dotenv import load_dotenv
 
+from services.external_api_monitoring import monitored_httpx_request
 from services.flight_ai import get_iata
 
 
@@ -108,8 +109,12 @@ async def search_flights_amadeus(
         headers = {"Authorization": f"Bearer {token}"}
 
         try:
-            resp = await client.get(
-                f"{base_url}/v2/shopping/flight-offers",
+            resp = await monitored_httpx_request(
+                client,
+                provider="Amadeus",
+                path="/external/amadeus/flight-offers-search",
+                method="GET",
+                url=f"{base_url}/v2/shopping/flight-offers",
                 params=query,
                 headers=headers,
                 timeout=15.0,
@@ -350,11 +355,16 @@ async def confirm_flight_price(
             },
         }
         try:
-            resp = await client.post(
-                f"{base_url}/v1/shopping/flight-offers/pricing",
+            resp = await monitored_httpx_request(
+                client,
+                provider="Amadeus",
+                path="/external/amadeus/flight-offers-pricing",
+                method="POST",
+                url=f"{base_url}/v1/shopping/flight-offers/pricing",
                 headers=headers,
                 json=payload,
                 timeout=20.0,
+                query_params={"offerCount": len(payload["data"]["flightOffers"])},
             )
             if resp.status_code != 200:
                 try:
@@ -399,11 +409,16 @@ async def get_seatmap_by_offer(
 
         payload = {"data": [flight_offer]}
         try:
-            resp = await client.post(
-                f"{base_url}/v1/shopping/seatmaps",
+            resp = await monitored_httpx_request(
+                client,
+                provider="Amadeus",
+                path="/external/amadeus/seatmaps",
+                method="POST",
+                url=f"{base_url}/v1/shopping/seatmaps",
                 headers=headers,
                 json=payload,
                 timeout=20.0,
+                query_params={"offerCount": len(payload["data"])},
             )
             if resp.status_code != 200:
                 try:

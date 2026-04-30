@@ -6,6 +6,8 @@ from datetime import date
 import httpx
 from dotenv import load_dotenv
 
+from services.external_api_monitoring import monitored_httpx_request
+
 load_dotenv()
 
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "")
@@ -41,13 +43,18 @@ async def get_weather(city: str) -> dict | None:
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(
-                OPENWEATHER_BASE,
-                params={
-                    "q": city,
-                    "appid": OPENWEATHER_API_KEY,
-                    "units": "metric",
-                },
+            params = {
+                "q": city,
+                "appid": OPENWEATHER_API_KEY,
+                "units": "metric",
+            }
+            resp = await monitored_httpx_request(
+                client,
+                provider="OpenWeather",
+                path="/external/openweather/current-weather",
+                method="GET",
+                url=OPENWEATHER_BASE,
+                params=params,
             )
             if resp.status_code != 200:
                 return None
@@ -89,13 +96,18 @@ async def get_weather_range(city: str, start_date: str, end_date: str) -> list[d
 
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
-            resp = await client.get(
-                OPENWEATHER_FORECAST_BASE,
-                params={
-                    "q": city,
-                    "appid": OPENWEATHER_API_KEY,
-                    "units": "metric",
-                },
+            params = {
+                "q": city,
+                "appid": OPENWEATHER_API_KEY,
+                "units": "metric",
+            }
+            resp = await monitored_httpx_request(
+                client,
+                provider="OpenWeather",
+                path="/external/openweather/forecast",
+                method="GET",
+                url=OPENWEATHER_FORECAST_BASE,
+                params=params,
             )
             if resp.status_code != 200:
                 return []

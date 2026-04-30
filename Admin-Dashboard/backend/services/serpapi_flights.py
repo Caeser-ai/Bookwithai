@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from dotenv import load_dotenv
 
+from services.external_api_monitoring import monitored_httpx_request
 from services.flight_ai import get_iata
 
 
@@ -66,8 +67,12 @@ async def search_flights_serpapi(
 
     async with httpx.AsyncClient() as client:
         try:
-            resp = await client.get(
-                "https://serpapi.com/search",
+            resp = await monitored_httpx_request(
+                client,
+                provider="SerpAPI",
+                path="/external/serpapi/google-flights-search",
+                method="GET",
+                url="https://serpapi.com/search",
                 params=params,
                 timeout=20.0,
             )
