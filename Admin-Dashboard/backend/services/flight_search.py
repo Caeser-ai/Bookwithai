@@ -73,6 +73,7 @@ class UnifiedSearchParams:
     excluded_airlines: Optional[List[str]] = None
     meal_preference: Optional[str] = None
     seat_preference: Optional[str] = None
+    time_window: Optional[str] = None
     nonstop_only: bool = False
     baggage_required: bool = False
     refundable_only: bool = False
@@ -406,7 +407,7 @@ async def unified_flight_search(params: UnifiedSearchParams) -> Tuple[List[Dict[
             or 0.0,
         ),
         reverse=True,
-    )[:15]
+    )
 
     # FlightAware enrichment + weather run concurrently for the strongest candidates
     origin_iata_for_weather = get_iata(params.origin)
@@ -436,8 +437,9 @@ async def unified_flight_search(params: UnifiedSearchParams) -> Tuple[List[Dict[
         dest_city=dest_city,
         preferred_airlines=params.preferred_airlines,
         preference_goal=params.preference,
+        meal_preference=params.meal_preference,
+        time_window=params.time_window,
     )
-    ranked_flights = ranked_flights[:10]
     verified_top_count = await _attach_price_confidence(ranked_flights, limit=PREVERIFY_TOP_RESULTS)
     _apply_rank_badges(ranked_flights)
     recommended_index = next(
@@ -483,6 +485,9 @@ async def unified_flight_search(params: UnifiedSearchParams) -> Tuple[List[Dict[
         "destination_map_url": destination_map_url,
         "preferred_airlines": params.preferred_airlines or [],
         "excluded_airlines": params.excluded_airlines or [],
+        "meal_preference": params.meal_preference,
+        "seat_preference": params.seat_preference,
+        "time_window": params.time_window,
         "nonstop_only": params.nonstop_only,
         "baggage_required": params.baggage_required,
         "refundable_only": params.refundable_only,
@@ -997,6 +1002,7 @@ def _build_cache_variant(params: UnifiedSearchParams) -> str:
         ),
         "meal_preference": (params.meal_preference or "").strip().lower(),
         "seat_preference": (params.seat_preference or "").strip().lower(),
+        "time_window": (params.time_window or "").strip().lower(),
         "nonstop_only": params.nonstop_only,
         "baggage_required": params.baggage_required,
         "refundable_only": params.refundable_only,
@@ -1183,6 +1189,71 @@ def _convenience_score(distance_km: Optional[float], travel_minutes: Optional[fl
     return max(1.0, round(score, 1))
 
 
+def _normalize_time_window_tokens(value: Optional[str]) -> List[str]:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return []
+
+    aliases = {
+        "morning": "morning",
+        "early morning": "morning",
+        "afternoon": "afternoon",
+        "midday": "afternoon",
+        "evening": "evening",
+        "late evening": "evening",
+        "night": "night",
+        "late night": "night",
+        "overnight": "night",
+        "red eye": "night",
+        "red-eye": "night",
+    }
+    normalized: List[str] = []
+    parts = re.split(r"[,/]|(?:\band\b)|(?:\bor\b)", raw)
+    for part in parts:
+        cleaned = " ".join(part.split())
+        if not cleaned:
+            continue
+        mapped = aliases.get(cleaned, cleaned)
+        if mapped not in normalized:
+            normalized.append(mapped)
+    return normalized
+
+
+def _departure_minutes(value: Any) -> Optional[int]:
+    raw = str(value or "")
+    match = re.search(r"(?:T|\b)(\d{2}):(\d{2})", raw)
+    if not match:
+        return None
+    hours = int(match.group(1))
+    minutes = int(match.group(2))
+    return (hours * 60) + minutes
+
+
+def _time_bucket_for_minutes(total_minutes: Optional[int]) -> Optional[str]:
+    if total_minutes is None:
+        return None
+    hours = (total_minutes // 60) % 24
+    if 5 <= hours < 12:
+        return "morning"
+    if 12 <= hours < 17:
+        return "afternoon"
+    if 17 <= hours < 21:
+        return "evening"
+    return "night"
+
+
+def _matches_time_window(
+    departure_value: Any,
+    preferred_windows: List[str],
+) -> Optional[bool]:
+    if not preferred_windows:
+        return None
+    bucket = _time_bucket_for_minutes(_departure_minutes(departure_value))
+    if not bucket:
+        return None
+    return bucket in preferred_windows
+
+
 def _apply_structured_analysis(
     flights: List[Dict[str, Any]],
     params: UnifiedSearchParams,
@@ -1342,6 +1413,16 @@ def _apply_structured_analysis(
             else:
                 preference_score -= 1.0
 
+        preferred_windows = _normalize_time_window_tokens(params.time_window)
+        time_window_matched = _matches_time_window(
+            flight.get("departure_at") or flight.get("departure_time"),
+            preferred_windows,
+        )
+        if time_window_matched is True:
+            preference_score += 1.0
+        elif time_window_matched is False:
+            preference_score -= 0.5
+
         # Amadeus refundability
         if params.refundable_only:
             refundable = bool(flight.get("refundable"))
@@ -1380,6 +1461,8 @@ def _apply_structured_analysis(
             "hasComplimentaryMeal": has_complimentary_meal,
             "mealPreference": params.meal_preference,
             "mealPreferenceMatched": meal_preference_matched,
+            "timeWindowPreference": params.time_window,
+            "timeWindowMatched": time_window_matched,
             "priceVerified": price_verified,
         }
         flight["score"] = round(overall_score, 1)

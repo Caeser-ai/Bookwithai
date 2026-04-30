@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Bell,
   Database,
@@ -16,12 +16,20 @@ import {
 } from "lucide-react";
 
 import { PageLoader } from "@/components/PageLoader";
-import type { AdminOverviewResponse, AdminUsersPageResponse } from "@/lib/admin-types";
+import type {
+  AdminAuthMeResponse,
+  AdminOverviewResponse,
+  AdminUsersListResponse,
+  AdminUsersPageResponse,
+} from "@/lib/admin-types";
+import { clearAdminClientCache } from "@/lib/admin-session";
 import { useAdminData } from "@/lib/use-admin-data";
 
 export function Settings() {
   const overview = useAdminData<AdminOverviewResponse>("/api/admin/overview");
   const users = useAdminData<AdminUsersPageResponse>("/api/admin/users");
+  const currentAdmin = useAdminData<AdminAuthMeResponse>("/api/admin/auth/me");
+  const adminAccounts = useAdminData<AdminUsersListResponse>("/api/admin/admin-users");
   const apiMonitoring = useAdminData<{
     apiKeys?: Array<{
       provider: string;
@@ -50,25 +58,46 @@ export function Settings() {
     securityAlerts: true,
   });
   const [accountForm, setAccountForm] = useState({
-    fullName: "Super Admin",
-    email: "admin@bookwithai.ai",
+    username: "",
+    fullName: "",
+    email: "",
     currentPassword: "",
     newPassword: "",
     confirmPassword: "",
   });
   const [newAdminForm, setNewAdminForm] = useState({
-    name: "",
+    username: "",
+    fullName: "",
     email: "",
-    role: "admin",
+    password: "",
+    confirmPassword: "",
   });
   const [settingsNote, setSettingsNote] = useState<string | null>(null);
+  const [savingAccount, setSavingAccount] = useState(false);
+  const [creatingAdmin, setCreatingAdmin] = useState(false);
 
   const loading =
-    (overview.loading || users.loading || apiMonitoring.loading) &&
+    (overview.loading || users.loading || apiMonitoring.loading || currentAdmin.loading || adminAccounts.loading) &&
     !overview.data &&
     !users.data &&
-    !apiMonitoring.data;
-  if (loading) return <PageLoader />;
+    !apiMonitoring.data &&
+    !currentAdmin.data &&
+    !adminAccounts.data;
+
+  useEffect(() => {
+    const admin = currentAdmin.data?.admin;
+    if (!admin) return;
+
+    setAccountForm((prev) => ({
+      ...prev,
+      username: admin.username || "",
+      fullName: admin.fullName || "",
+      email: admin.email || "",
+      currentPassword: "",
+      newPassword: "",
+      confirmPassword: "",
+    }));
+  }, [currentAdmin.data?.admin?.id]);
 
   const toggleFeature = (key: keyof typeof featureFlags) => {
     setFeatureFlags((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -78,8 +107,117 @@ export function Settings() {
     setNotifications((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const error = overview.error ?? users.error ?? apiMonitoring.error;
-  const admins = (users.data?.users ?? []).filter((user) => user.role.toLowerCase() === "admin");
+  const error =
+    overview.error ??
+    users.error ??
+    apiMonitoring.error ??
+    currentAdmin.error ??
+    adminAccounts.error;
+  const admins = adminAccounts.data?.admins ?? [];
+
+  const handleSaveAccount = async () => {
+    try {
+      setSavingAccount(true);
+      setSettingsNote(null);
+
+      if (!accountForm.username.trim() || !accountForm.fullName.trim() || !accountForm.email.trim()) {
+        throw new Error("Username, full name, and email are required.");
+      }
+      if ((accountForm.currentPassword || accountForm.newPassword || accountForm.confirmPassword) && !accountForm.currentPassword) {
+        throw new Error("Enter your current password to set a new password.");
+      }
+      if (accountForm.newPassword !== accountForm.confirmPassword) {
+        throw new Error("New password and confirm password must match.");
+      }
+
+      const response = await fetch("/api/admin/account", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          username: accountForm.username,
+          fullName: accountForm.fullName,
+          email: accountForm.email,
+          currentPassword: accountForm.currentPassword || undefined,
+          newPassword: accountForm.newPassword || undefined,
+        }),
+      });
+      const payload = (await response.json()) as { detail?: string; admin?: AdminAuthMeResponse["admin"] };
+      if (!response.ok) {
+        throw new Error(payload.detail || "Could not save account changes.");
+      }
+
+      await currentAdmin.refresh();
+      await adminAccounts.refresh();
+      setAccountForm((prev) => ({
+        ...prev,
+        currentPassword: "",
+        newPassword: "",
+        confirmPassword: "",
+      }));
+      setSettingsNote("Super admin account details updated successfully.");
+    } catch (err) {
+      setSettingsNote(err instanceof Error ? err.message : "Could not save account changes.");
+    } finally {
+      setSavingAccount(false);
+    }
+  };
+
+  const handleCreateAdmin = async () => {
+    try {
+      setCreatingAdmin(true);
+      setSettingsNote(null);
+
+      if (!newAdminForm.username.trim() || !newAdminForm.fullName.trim() || !newAdminForm.email.trim()) {
+        throw new Error("Username, full name, and email are required.");
+      }
+      if (!newAdminForm.password.trim()) {
+        throw new Error("Password is required for the new super admin.");
+      }
+      if (newAdminForm.password !== newAdminForm.confirmPassword) {
+        throw new Error("New super admin passwords do not match.");
+      }
+
+      const response = await fetch("/api/admin/admin-users", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          username: newAdminForm.username,
+          fullName: newAdminForm.fullName,
+          email: newAdminForm.email,
+          password: newAdminForm.password,
+        }),
+      });
+      const payload = (await response.json()) as { detail?: string };
+      if (!response.ok) {
+        throw new Error(payload.detail || "Could not create the super admin.");
+      }
+
+      await adminAccounts.refresh();
+      setNewAdminForm({
+        username: "",
+        fullName: "",
+        email: "",
+        password: "",
+        confirmPassword: "",
+      });
+      setSettingsNote("New super admin created successfully.");
+    } catch (err) {
+      setSettingsNote(err instanceof Error ? err.message : "Could not create the super admin.");
+    } finally {
+      setCreatingAdmin(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await fetch("/api/admin/auth/sign-out", { method: "POST" });
+    } finally {
+      clearAdminClientCache();
+      window.location.assign("/sign-in");
+    }
+  };
+
+  if (loading) return <PageLoader />;
 
   return (
     <div className="space-y-6">
@@ -100,7 +238,7 @@ export function Settings() {
         </button>
       </div>
 
-      {/* {error ? (
+      {error ? (
         <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
           {error}
         </div>
@@ -121,7 +259,7 @@ export function Settings() {
             <p className="mt-2 text-sm text-gray-500">{metric.description}</p>
           </div>
         ))}
-      </div> */}
+      </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
@@ -130,6 +268,14 @@ export function Settings() {
             <h2 className="text-lg font-semibold text-gray-900">Account Settings</h2>
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <label className="text-sm text-gray-700">
+              Username
+              <input
+                value={accountForm.username}
+                onChange={(e) => setAccountForm((p) => ({ ...p, username: e.target.value }))}
+                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+              />
+            </label>
             <label className="text-sm text-gray-700">
               Full Name
               <input
@@ -177,14 +323,17 @@ export function Settings() {
           </div>
           <div className="mt-4 flex items-center gap-3">
             <button
-              onClick={() =>
-                setSettingsNote(
-                  "Account update UI is ready. Persist API for admin profile/password is not available yet.",
-                )
-              }
+              onClick={() => void handleSaveAccount()}
+              disabled={savingAccount}
               className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
             >
-              Save Account Changes
+              {savingAccount ? "Saving..." : "Save Account Changes"}
+            </button>
+            <button
+              onClick={() => void handleSignOut()}
+              className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Sign Out
             </button>
             <span className="text-xs text-gray-500">Role: Super Admin</span>
           </div>
@@ -201,24 +350,33 @@ export function Settings() {
           <div className="space-y-3">
             {admins.slice(0, 6).map((admin) => (
               <div key={admin.id} className="rounded-lg border border-gray-200 p-3">
-                <p className="text-sm font-medium text-gray-900">{admin.name || admin.email}</p>
-                <p className="mt-1 text-xs text-gray-500">{admin.email}</p>
+                <p className="text-sm font-medium text-gray-900">{admin.fullName}</p>
+                <p className="mt-1 text-xs text-gray-500">
+                  @{admin.username} {admin.email ? `• ${admin.email}` : ""}
+                </p>
               </div>
             ))}
             {!admins.length ? (
               <div className="rounded-lg border border-gray-200 p-3 text-sm text-gray-600">
-                No additional admin users found in current analytics.
+                No super admin accounts have been created yet.
               </div>
             ) : null}
           </div>
 
           <div className="mt-5 rounded-lg border border-gray-200 p-4">
-            <p className="mb-3 text-sm font-semibold text-gray-900">Create New Admin</p>
+            <p className="mb-1 text-sm font-semibold text-gray-900">Create New Super Admin</p>
+            <p className="mb-3 text-xs text-gray-500">Every admin account currently gets full super admin access.</p>
             <div className="grid grid-cols-1 gap-3">
               <input
-                placeholder="Name"
-                value={newAdminForm.name}
-                onChange={(e) => setNewAdminForm((p) => ({ ...p, name: e.target.value }))}
+                placeholder="Username"
+                value={newAdminForm.username}
+                onChange={(e) => setNewAdminForm((p) => ({ ...p, username: e.target.value }))}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
+              />
+              <input
+                placeholder="Full Name"
+                value={newAdminForm.fullName}
+                onChange={(e) => setNewAdminForm((p) => ({ ...p, fullName: e.target.value }))}
                 className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
               />
               <input
@@ -228,24 +386,27 @@ export function Settings() {
                 onChange={(e) => setNewAdminForm((p) => ({ ...p, email: e.target.value }))}
                 className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
               />
-              <select
-                value={newAdminForm.role}
-                onChange={(e) => setNewAdminForm((p) => ({ ...p, role: e.target.value }))}
+              <input
+                placeholder="Password"
+                type="password"
+                value={newAdminForm.password}
+                onChange={(e) => setNewAdminForm((p) => ({ ...p, password: e.target.value }))}
                 className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
-              >
-                <option value="admin">Admin</option>
-                <option value="analyst">Analyst</option>
-              </select>
+              />
+              <input
+                placeholder="Confirm Password"
+                type="password"
+                value={newAdminForm.confirmPassword}
+                onChange={(e) => setNewAdminForm((p) => ({ ...p, confirmPassword: e.target.value }))}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
+              />
             </div>
             <button
-              onClick={() =>
-                setSettingsNote(
-                  "Create Admin form captured. Backend endpoint for admin creation is not implemented yet.",
-                )
-              }
+              onClick={() => void handleCreateAdmin()}
+              disabled={creatingAdmin}
               className="mt-3 rounded-lg bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700"
             >
-              Create Admin
+              {creatingAdmin ? "Creating..." : "Create Super Admin"}
             </button>
           </div>
         </div>
@@ -480,8 +641,8 @@ export function Settings() {
           Settings write operations status
         </div>
         <p>
-          Account update and create-admin UI is ready. To make these actions fully dynamic, add backend
-          admin write APIs (profile/password update and admin user create), then wire them in this page.
+          Super admin account settings now update the new admin auth table directly, including
+          username, email, password changes, and super admin creation.
         </p>
         {settingsNote ? <p className="mt-2 text-xs text-blue-700">Note: {settingsNote}</p> : null}
       </div>

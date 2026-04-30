@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -13,7 +14,8 @@ logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, HTTPException, Depends, Header, Query, Body
 from pydantic import BaseModel
-from sqlalchemy import and_, func, text
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import and_, bindparam, case, func, text
 from sqlalchemy.orm import Session
 
 from orchestion import (
@@ -52,6 +54,11 @@ from services.weather import get_weather, get_city_name, get_weather_advice
 from services.maps import get_directions_url, get_destination_map_url, get_airport_name
 from services.geocode import reverse_geocode
 from services.flightaware_client import get_flight_details
+from services.external_api_monitoring import (
+    MONITORED_EXTERNAL_PROVIDERS,
+    PROVIDER_KEY_NAMES,
+    ensure_api_monitoring_infra,
+)
 from database import get_db, get_user_db, get_chat_db
 from models.chat import ChatSession, ChatMessage
 from models.user import GuestPassengerProfile, User, TravelPreference
@@ -60,8 +67,20 @@ from models.price_alert import PriceAlert
 from models.consent import ConsentRecord
 from models.feedback import Feedback
 from models.api_monitoring import ApiRequestLog
+from models.admin_user import AdminUser
 from auth import get_current_user_id, get_optional_user_id
 from passlib.context import CryptContext
+from services.admin_auth import (
+    ADMIN_ROLE_SUPER_ADMIN,
+    ADMIN_JWT_EXPIRES_HOURS,
+    create_admin_access_token,
+    decode_admin_access_token,
+    ensure_admin_auth_infra,
+    hash_admin_password,
+    normalize_admin_email,
+    normalize_admin_username,
+    verify_admin_password,
+)
 
 # ── Auth Setup ───────────────────────────────────────────
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -337,6 +356,8 @@ def _apply_saved_profile_preferences(
     layover_preference = (getattr(pref, "layover_preference", None) or "").strip()
     flight_timing = getattr(pref, "flight_timing", None) or []
     travel_style = (getattr(pref, "travel_style", None) or "").strip()
+    meal_preference = (getattr(pref, "meal_preference", None) or "").strip()
+    seat_preference = (getattr(pref, "seat_preference", None) or "").strip()
 
     if not _message_mentions_cabin_preference(message):
         cabin_map = {
@@ -360,6 +381,12 @@ def _apply_saved_profile_preferences(
 
     if not preferences.get("time_window") and flight_timing:
         preferences["time_window"] = ", ".join(flight_timing)
+
+    if not preferences.get("meal_preference") and meal_preference:
+        preferences["meal_preference"] = meal_preference
+
+    if not preferences.get("seat_preference") and seat_preference:
+        preferences["seat_preference"] = seat_preference
 
     if not preferences.get("ranking_goal"):
         if travel_style == "Budget Optimized":
@@ -447,16 +474,14 @@ def _build_profile_recommendation_note(
     ):
         preference_signals.append("your baggage preference")
 
+    analysis = recommended_flight.get("analysis") or {}
+    if analysis.get("timeWindowMatched") is True and preferences.get("time_window"):
+        preference_signals.append("your preferred departure time")
+
     if travel_preference:
-        seat_pref = str(getattr(travel_preference, "seat_preference", "") or "").strip()
         meal_pref = str(getattr(travel_preference, "meal_preference", "") or "").strip()
-        if seat_pref:
-            preference_signals.append(f"your seat preference ({seat_pref})")
-        if meal_pref:
-            meal_services = [str(item).lower() for item in (recommended_flight.get("meal_services") or [])]
-            perks = [str(item).lower() for item in (recommended_flight.get("perks") or [])]
-            if any("meal" in item for item in meal_services + perks):
-                preference_signals.append(f"your meal preference ({meal_pref})")
+        if meal_pref and analysis.get("mealPreferenceMatched") is True:
+            preference_signals.append(f"your meal preference ({meal_pref})")
 
     explanation = (recommendation_explanation or "").strip()
     if explanation and explanation[-1:] not in {".", "!", "?"}:
@@ -666,11 +691,73 @@ def _is_trip_save_confirmation(message: str) -> bool:
 # ── Admin auth helper ─────────────────────────────────────
 
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+_admin_bearer = HTTPBearer(auto_error=False)
 
 
-def require_admin(x_admin_token: str = Header(None)) -> None:
-    if not ADMIN_TOKEN or x_admin_token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+@dataclass
+class AdminPrincipal:
+    source: str
+    admin: Optional[AdminUser]
+    role: str
+    username: Optional[str]
+
+
+def _serialize_admin_user(admin: AdminUser) -> dict[str, Any]:
+    return {
+        "id": str(admin.id),
+        "username": admin.username,
+        "email": admin.email,
+        "fullName": admin.full_name,
+        "role": admin.role,
+        "isActive": bool(admin.is_active),
+        "lastLoginAt": admin.last_login_at.isoformat() if admin.last_login_at else None,
+        "createdAt": admin.created_at.isoformat() if admin.created_at else None,
+        "updatedAt": admin.updated_at.isoformat() if admin.updated_at else None,
+    }
+
+
+def _service_token_principal() -> AdminPrincipal:
+    return AdminPrincipal(
+        source="service-token",
+        admin=None,
+        role=ADMIN_ROLE_SUPER_ADMIN,
+        username="legacy-admin",
+    )
+
+
+def require_admin(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_admin_bearer),
+    x_admin_token: Optional[str] = Header(default=None),
+    db_user: Session = Depends(get_user_db),
+) -> AdminPrincipal:
+    ensure_admin_auth_infra()
+
+    if ADMIN_TOKEN and x_admin_token == ADMIN_TOKEN:
+        return _service_token_principal()
+
+    if credentials and credentials.scheme.lower() == "bearer":
+        try:
+            payload = decode_admin_access_token(credentials.credentials)
+        except Exception:
+            payload = None
+
+        if payload:
+            admin_id = str(payload.get("sub") or "").strip()
+            if admin_id:
+                admin = (
+                    db_user.query(AdminUser)
+                    .filter(AdminUser.id == admin_id, AdminUser.is_active.is_(True))
+                    .first()
+                )
+                if admin is not None:
+                    return AdminPrincipal(
+                        source="jwt",
+                        admin=admin,
+                        role=admin.role or ADMIN_ROLE_SUPER_ADMIN,
+                        username=admin.username,
+                    )
+
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 # ── Models ──────────────────────────────────────────────
@@ -688,6 +775,65 @@ class ChatRequest(BaseModel):
     user_city: Optional[str] = None
     stream: bool = False
     recent_flights: Optional[List[Dict[str, Any]]] = None
+
+
+_CHAT_SESSION_HISTORY_LIMIT = 24
+
+
+def _history_signature(item: Dict[str, str]) -> str:
+    role = (item.get("role") or "").strip().lower()
+    content = re.sub(r"\s+", " ", (item.get("content") or "").strip())
+    return f"{role}::{content}"
+
+
+def _merge_chat_histories(
+    session_history: List[Dict[str, str]],
+    request_history: List[Dict[str, str]],
+    *,
+    limit: int = _CHAT_SESSION_HISTORY_LIMIT,
+) -> List[Dict[str, str]]:
+    cleaned_session = [
+        {"role": (item.get("role") or "").strip().lower(), "content": (item.get("content") or "").strip()}
+        for item in (session_history or [])
+        if (item.get("role") or "").strip().lower() in {"user", "assistant"} and (item.get("content") or "").strip()
+    ]
+    cleaned_request = [
+        {"role": (item.get("role") or "").strip().lower(), "content": (item.get("content") or "").strip()}
+        for item in (request_history or [])
+        if (item.get("role") or "").strip().lower() in {"user", "assistant"} and (item.get("content") or "").strip()
+    ]
+    if not cleaned_session:
+        return cleaned_request[-limit:]
+    if not cleaned_request:
+        return cleaned_session[-limit:]
+
+    session_signatures = [_history_signature(item) for item in cleaned_session]
+    request_signatures = [_history_signature(item) for item in cleaned_request]
+    overlap = 0
+    max_overlap = min(len(cleaned_session), len(cleaned_request))
+    for size in range(max_overlap, 0, -1):
+        if session_signatures[-size:] == request_signatures[:size]:
+            overlap = size
+            break
+
+    merged = cleaned_session + cleaned_request[overlap:]
+    deduped: List[Dict[str, str]] = []
+    for item in merged:
+        if deduped and _history_signature(deduped[-1]) == _history_signature(item):
+            continue
+        deduped.append(item)
+    return deduped[-limit:]
+
+
+def _extract_recent_flights_from_session_messages(messages: List[ChatMessage]) -> List[Dict[str, Any]]:
+    for message in reversed(messages):
+        metadata = getattr(message, "metadata_", None) or {}
+        if not isinstance(metadata, dict):
+            continue
+        flights = metadata.get("all_flights") or metadata.get("flights") or []
+        if isinstance(flights, list) and flights:
+            return [flight for flight in flights if isinstance(flight, dict)]
+    return []
 
 
 class ChatTitleRequest(BaseModel):
@@ -743,7 +889,13 @@ class FlightSearchRequest(BaseModel):
     return_date: Optional[str] = None
     currency: Optional[str] = "INR"
     budget: Optional[float] = None
+    cabin_class: Optional[str] = "economy"
+    ranking_goal: Optional[str] = None
     preferred_airlines: Optional[List[str]] = None
+    excluded_airlines: Optional[List[str]] = None
+    meal_preference: Optional[str] = None
+    seat_preference: Optional[str] = None
+    time_window: Optional[str] = None
     nonstop_only: bool = False
     baggage_required: bool = False
     refundable_only: bool = False
@@ -838,6 +990,34 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+
+class AdminSignInPayload(BaseModel):
+    username: str
+    password: str
+
+
+class AdminBootstrapPayload(BaseModel):
+    username: str
+    full_name: str
+    email: str
+    password: str
+
+
+class AdminAccountUpdatePayload(BaseModel):
+    username: str
+    full_name: str
+    email: str
+    current_password: Optional[str] = None
+    new_password: Optional[str] = None
+
+
+class AdminCreatePayload(BaseModel):
+    username: str
+    full_name: str
+    email: str
+    password: str
+
+
 class VerifyOTPRequest(BaseModel):
     email: str
     otp: str
@@ -892,6 +1072,216 @@ class UserProfileUpdatePayload(BaseModel):
 @router.get("/health")
 async def health_check():
     return {"status": "ok", "version": "1.0.0", "service": "Book With AI API"}
+
+
+# ── Admin Auth ───────────────────────────────────────────
+
+def _validate_admin_identity_fields(*, username: str, full_name: str, email: str) -> tuple[str, str, str]:
+    normalized_username = normalize_admin_username(username)
+    normalized_email = normalize_admin_email(email)
+    normalized_full_name = " ".join((full_name or "").strip().split())
+
+    if len(normalized_username) < 3:
+        raise HTTPException(status_code=400, detail="Username must be at least 3 characters.")
+    if "@" not in normalized_email:
+        raise HTTPException(status_code=400, detail="A valid email address is required.")
+    if len(normalized_full_name) < 2:
+        raise HTTPException(status_code=400, detail="Full name is required.")
+
+    return normalized_username, normalized_full_name, normalized_email
+
+
+def _validate_admin_password_strength(password: str) -> None:
+    if len((password or "").strip()) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+
+
+def _build_admin_auth_response(admin: AdminUser) -> dict[str, Any]:
+    token = create_admin_access_token(
+        admin_id=str(admin.id),
+        username=admin.username,
+        role=admin.role or ADMIN_ROLE_SUPER_ADMIN,
+    )
+    return {
+        "accessToken": token,
+        "expiresInSeconds": ADMIN_JWT_EXPIRES_HOURS * 60 * 60,
+        "admin": _serialize_admin_user(admin),
+    }
+
+
+@router.get("/admin/auth/setup-status")
+async def admin_auth_setup_status(db_user: Session = Depends(get_user_db)):
+    ensure_admin_auth_infra()
+    admin_count = db_user.query(func.count(AdminUser.id)).scalar() or 0
+    return {"needsSetup": int(admin_count) == 0}
+
+
+@router.post("/admin/auth/bootstrap")
+async def admin_auth_bootstrap(payload: AdminBootstrapPayload, db_user: Session = Depends(get_user_db)):
+    ensure_admin_auth_infra()
+    admin_count = db_user.query(func.count(AdminUser.id)).scalar() or 0
+    if int(admin_count) > 0:
+        raise HTTPException(status_code=400, detail="Admin setup is already complete.")
+
+    username, full_name, email = _validate_admin_identity_fields(
+        username=payload.username,
+        full_name=payload.full_name,
+        email=payload.email,
+    )
+    _validate_admin_password_strength(payload.password)
+
+    admin = AdminUser(
+        username=username,
+        full_name=full_name,
+        email=email,
+        password_hash=hash_admin_password(payload.password),
+        role=ADMIN_ROLE_SUPER_ADMIN,
+        is_active=True,
+        last_login_at=datetime.utcnow(),
+    )
+    db_user.add(admin)
+    db_user.commit()
+    db_user.refresh(admin)
+    return _build_admin_auth_response(admin)
+
+
+@router.post("/admin/auth/sign-in")
+async def admin_auth_sign_in(payload: AdminSignInPayload, db_user: Session = Depends(get_user_db)):
+    ensure_admin_auth_infra()
+    username = normalize_admin_username(payload.username)
+    if not username or not payload.password:
+        raise HTTPException(status_code=400, detail="Username and password are required.")
+
+    admin = db_user.query(AdminUser).filter(AdminUser.username == username).first()
+    if admin is None or not admin.is_active or not verify_admin_password(payload.password, admin.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    admin.last_login_at = datetime.utcnow()
+    admin.updated_at = datetime.utcnow()
+    db_user.add(admin)
+    db_user.commit()
+    db_user.refresh(admin)
+    return _build_admin_auth_response(admin)
+
+
+@router.get("/admin/auth/me")
+async def admin_auth_me(current_admin: AdminPrincipal = Depends(require_admin)):
+    if current_admin.admin is not None:
+        return {"admin": _serialize_admin_user(current_admin.admin)}
+
+    return {
+        "admin": {
+            "id": "legacy-admin",
+            "username": current_admin.username or "legacy-admin",
+            "email": None,
+            "fullName": "Legacy Admin",
+            "role": current_admin.role,
+            "isActive": True,
+            "lastLoginAt": None,
+            "createdAt": None,
+            "updatedAt": None,
+        }
+    }
+
+
+@router.patch("/admin/account")
+async def admin_update_account(
+    payload: AdminAccountUpdatePayload,
+    current_admin: AdminPrincipal = Depends(require_admin),
+    db_user: Session = Depends(get_user_db),
+):
+    if current_admin.admin is None:
+        raise HTTPException(status_code=403, detail="Legacy token sessions cannot update admin account details.")
+
+    admin = current_admin.admin
+    username, full_name, email = _validate_admin_identity_fields(
+        username=payload.username,
+        full_name=payload.full_name,
+        email=payload.email,
+    )
+
+    duplicate_username = (
+        db_user.query(AdminUser)
+        .filter(AdminUser.username == username, AdminUser.id != admin.id)
+        .first()
+    )
+    if duplicate_username is not None:
+        raise HTTPException(status_code=400, detail="That username is already in use.")
+
+    duplicate_email = (
+        db_user.query(AdminUser)
+        .filter(AdminUser.email == email, AdminUser.id != admin.id)
+        .first()
+    )
+    if duplicate_email is not None:
+        raise HTTPException(status_code=400, detail="That email is already in use.")
+
+    if payload.new_password or payload.current_password:
+        if not payload.current_password or not payload.new_password:
+            raise HTTPException(
+                status_code=400,
+                detail="Current password and new password are both required to change the password.",
+            )
+        if not verify_admin_password(payload.current_password, admin.password_hash):
+            raise HTTPException(status_code=400, detail="Current password is incorrect.")
+        _validate_admin_password_strength(payload.new_password)
+        admin.password_hash = hash_admin_password(payload.new_password)
+
+    admin.username = username
+    admin.full_name = full_name
+    admin.email = email
+    admin.updated_at = datetime.utcnow()
+    db_user.add(admin)
+    db_user.commit()
+    db_user.refresh(admin)
+    return {"admin": _serialize_admin_user(admin)}
+
+
+@router.get("/admin/admin-users")
+async def admin_list_admin_users(
+    _: AdminPrincipal = Depends(require_admin),
+    db_user: Session = Depends(get_user_db),
+):
+    ensure_admin_auth_infra()
+    admins = (
+        db_user.query(AdminUser)
+        .order_by(AdminUser.created_at.desc(), AdminUser.username.asc())
+        .all()
+    )
+    return {"admins": [_serialize_admin_user(admin) for admin in admins]}
+
+
+@router.post("/admin/admin-users")
+async def admin_create_admin_user(
+    payload: AdminCreatePayload,
+    _: AdminPrincipal = Depends(require_admin),
+    db_user: Session = Depends(get_user_db),
+):
+    ensure_admin_auth_infra()
+    username, full_name, email = _validate_admin_identity_fields(
+        username=payload.username,
+        full_name=payload.full_name,
+        email=payload.email,
+    )
+    _validate_admin_password_strength(payload.password)
+
+    if db_user.query(AdminUser).filter(AdminUser.username == username).first() is not None:
+        raise HTTPException(status_code=400, detail="That username is already in use.")
+    if db_user.query(AdminUser).filter(AdminUser.email == email).first() is not None:
+        raise HTTPException(status_code=400, detail="That email is already in use.")
+
+    admin = AdminUser(
+        username=username,
+        full_name=full_name,
+        email=email,
+        password_hash=hash_admin_password(payload.password),
+        role=ADMIN_ROLE_SUPER_ADMIN,
+        is_active=True,
+    )
+    db_user.add(admin)
+    db_user.commit()
+    db_user.refresh(admin)
+    return {"admin": _serialize_admin_user(admin)}
 
 
 # ── Auth ────────────────────────────────────────────────
@@ -1102,9 +1492,10 @@ async def chat_endpoint(
     msg = request.message
     history = [{"role": h.role, "content": h.content} for h in request.history]
     sid = request.session_id
+    recent_flights: List[Dict[str, Any]] = request.recent_flights or []
 
     def merge_recent_session_history() -> None:
-        nonlocal history
+        nonlocal history, recent_flights
         if not sid:
             return
         try:
@@ -1116,7 +1507,7 @@ async def chat_endpoint(
             db.query(ChatMessage)
             .filter(ChatMessage.session_id == sid_uuid)
             .order_by(ChatMessage.created_at.desc())
-            .limit(10)
+            .limit(_CHAT_SESSION_HISTORY_LIMIT)
             .all()
         )
         if not db_rows:
@@ -1128,24 +1519,13 @@ async def chat_endpoint(
             if (row.role or "").strip().lower() in {"user", "assistant"}
             and (row.content or "").strip()
         ]
-        if not db_history:
-            return
+        history = _merge_chat_histories(db_history, history)
 
-        merged = db_history + history
-        deduped: List[Dict[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for item in merged:
-            key = (
-                (item.get("role") or "").strip().lower(),
-                (item.get("content") or "").strip(),
-            )
-            if not key[0] or not key[1]:
-                continue
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append({"role": key[0], "content": key[1]})
-        history = deduped[-12:]
+        session_recent_flights = _extract_recent_flights_from_session_messages(list(reversed(db_rows)))
+        if session_recent_flights and (
+            not recent_flights or len(session_recent_flights) > len(recent_flights)
+        ):
+            recent_flights = session_recent_flights
 
     merge_recent_session_history()
 
@@ -1915,7 +2295,6 @@ async def chat_endpoint(
                 persist_chat_exchange(response)
                 return response
 
-    recent_flights: List[Dict[str, Any]] = request.recent_flights or []
     cached_session_response = _find_cached_session_reply(db, sid, msg)
     if cached_session_response:
         cached_session_response["session_id"] = sid
@@ -2037,15 +2416,19 @@ async def chat_endpoint(
                 cabin=cabin,
                 preference=preferences.get("ranking_goal"),
                 preferred_airlines=preferences.get("preferred_airlines") or [],
+                excluded_airlines=preferences.get("excluded_airlines") or [],
+                meal_preference=preferences.get("meal_preference"),
+                seat_preference=preferences.get("seat_preference"),
+                time_window=preferences.get("time_window"),
                 nonstop_only=bool(constraints.get("nonstop_only")),
                 baggage_required=bool(constraints.get("baggage_required")),
                 refundable_only=bool(constraints.get("refundable_only")),
                 user_lat=request.user_lat,
                 user_lng=request.user_lng,
             )
-            flights, search_info = await unified_flight_search(search_params)
+            all_flights, search_info = await unified_flight_search(search_params)
             # Show only top 5 ranked flights in chat.
-            flights = flights[:5]
+            flights = all_flights[:5]
             try:
                 # Recompute indices within the sliced list for consistent summary pills.
                 cheapest_index = min(
@@ -2092,7 +2475,8 @@ async def chat_endpoint(
             if isinstance(search_info, dict):
                 search_info.update(
                     {
-                        "total_results": len(flights),
+                        "total_results": len(all_flights),
+                        "display_results": len(flights),
                         "recommended_index": recommended_index,
                         "cheapest_index": cheapest_index,
                         "fastest_index": fastest_index,
@@ -2108,10 +2492,11 @@ async def chat_endpoint(
                 "type": "flights",
                 "text": result_text,
                 "flights": flights,
+                "all_flights": all_flights,
                 "search": search,
                 "session_id": sid,
                 "summary": {
-                    "totalOptions": len(flights),
+                    "totalOptions": len(all_flights),
                     "recommendedFlightId": (
                         flights[search_info.get("recommended_index", 0)].get("flight_id")
                         if flights else None
@@ -2154,7 +2539,7 @@ async def chat_endpoint(
                         )
 
             # Build why_choose from AI pros or score_reason fallback
-            for fl in flights:
+            for fl in all_flights:
                 reasons = list((fl.get("ranking") or {}).get("pros") or fl.get("pros") or [])
                 if not reasons and fl.get("score_reason"):
                     reasons.append(fl["score_reason"])
@@ -2372,16 +2757,21 @@ async def flight_search_endpoint(request: FlightSearchRequest):
         passengers=request.passengers,
         currency=request.currency or "INR",
         budget=request.budget,
-        cabin="economy",
+        cabin=(request.cabin_class or "economy"),
+        preference=request.ranking_goal,
         preferred_airlines=request.preferred_airlines or [],
+        excluded_airlines=request.excluded_airlines or [],
+        meal_preference=request.meal_preference,
+        seat_preference=request.seat_preference,
+        time_window=request.time_window,
         nonstop_only=request.nonstop_only,
         baggage_required=request.baggage_required,
         refundable_only=request.refundable_only,
         user_lat=request.user_lat,
         user_lng=request.user_lng,
     )
-    flights, search_info = await unified_flight_search(search_params)
-    flights = flights[:5]
+    all_flights, search_info = await unified_flight_search(search_params)
+    flights = all_flights[:5]
     out = {
         "origin": request.origin,
         "destination": request.destination,
@@ -2390,6 +2780,7 @@ async def flight_search_endpoint(request: FlightSearchRequest):
         "passengers": request.passengers,
         "currency": request.currency or "INR",
         "flights": flights,
+        "all_flights": all_flights,
     }
     if search_info:
         try:
@@ -2400,7 +2791,8 @@ async def flight_search_endpoint(request: FlightSearchRequest):
             recommended_index = 0
         search_info = {
             **search_info,
-            "total_results": len(flights),
+            "total_results": len(all_flights),
+            "display_results": len(flights),
             "recommended_index": recommended_index,
         }
         out["search_info"] = search_info
@@ -2410,6 +2802,11 @@ async def flight_search_endpoint(request: FlightSearchRequest):
             search={
                 "origin": request.origin,
                 "destination": request.destination,
+                "preferences": {
+                    "ranking_goal": request.ranking_goal,
+                    "preferred_airlines": request.preferred_airlines or [],
+                    "time_window": request.time_window,
+                },
                 "constraints": {
                     "nonstop_only": request.nonstop_only,
                     "baggage_required": request.baggage_required,
@@ -4603,6 +5000,78 @@ async def admin_retention(
     }
 
 
+def _monitoring_window_delta(window: str) -> timedelta:
+    window_map = {
+        "1h": timedelta(hours=1),
+        "6h": timedelta(hours=6),
+        "24h": timedelta(hours=24),
+        "7d": timedelta(days=7),
+        "15d": timedelta(days=15),
+        "30d": timedelta(days=30),
+    }
+    return window_map.get(window, timedelta(hours=24))
+
+
+def _monitoring_chart_config(window: str, now: datetime) -> tuple[str, datetime, timedelta, int, str]:
+    if window == "1h":
+        anchor = now.replace(second=0, microsecond=0)
+        return ("minute", anchor - timedelta(minutes=59), timedelta(minutes=1), 60, "%H:%M")
+    if window == "6h":
+        anchor = now.replace(minute=0, second=0, microsecond=0)
+        return ("hour", anchor - timedelta(hours=5), timedelta(hours=1), 6, "%H:00")
+    if window == "24h":
+        anchor = now.replace(minute=0, second=0, microsecond=0)
+        return ("hour", anchor - timedelta(hours=23), timedelta(hours=1), 24, "%H:00")
+
+    days = {"7d": 7, "15d": 15, "30d": 30}.get(window, 7)
+    anchor = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return ("day", anchor - timedelta(days=days - 1), timedelta(days=1), days, "%b %d")
+
+
+def _external_api_scope_filters() -> List[Any]:
+    return [
+        ApiRequestLog.path.like("/external/%"),
+        ApiRequestLog.provider.in_(MONITORED_EXTERNAL_PROVIDERS),
+    ]
+
+
+def _build_monitoring_volume_series(
+    rows: List[Any],
+    *,
+    bucket_start: datetime,
+    bucket_step: timedelta,
+    bucket_count: int,
+    label_format: str,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    bucket_totals: dict[datetime, dict[str, int]] = {}
+    for row in rows:
+        current_bucket = getattr(row, "bucket_start", None)
+        if not isinstance(current_bucket, datetime):
+            continue
+        bucket_totals[current_bucket.replace(tzinfo=None)] = {
+            "requests": int(getattr(row, "requests", 0) or 0),
+            "errors": int(getattr(row, "errors", 0) or 0),
+        }
+
+    request_volume: List[Dict[str, Any]] = []
+    error_rate_trend: List[Dict[str, Any]] = []
+    cursor = bucket_start
+    for _ in range(bucket_count):
+        totals = bucket_totals.get(cursor, {"requests": 0, "errors": 0})
+        label = cursor.strftime(label_format)
+        requests = totals["requests"]
+        request_volume.append({"label": label, "requests": requests})
+        error_rate_trend.append(
+            {
+                "label": label,
+                "rate": round((totals["errors"] / requests) * 100, 2) if requests else 0.0,
+            }
+        )
+        cursor += bucket_step
+
+    return request_volume, error_rate_trend
+
+
 @router.get("/admin/api-monitoring")
 async def admin_api_monitoring(
     _: None = Depends(require_admin),
@@ -4613,227 +5082,130 @@ async def admin_api_monitoring(
     db_user: Session = Depends(get_user_db),
 ):
     """Per-request API monitoring feed from persisted request logs."""
-    db_user.execute(
-        text(
-            """
-            CREATE TABLE IF NOT EXISTS api_request_logs (
-              id UUID PRIMARY KEY,
-              request_id VARCHAR(64),
-              method VARCHAR(16) NOT NULL,
-              path VARCHAR(255) NOT NULL,
-              status_code INTEGER NOT NULL,
-              latency_ms INTEGER NOT NULL,
-              query_params JSONB,
-              provider VARCHAR(64),
-              api_key_name VARCHAR(128),
-              api_key_last4 VARCHAR(8),
-              user_id VARCHAR(64),
-              client_ip VARCHAR(64),
-              user_agent TEXT,
-              error_message TEXT,
-              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-    )
-    db_user.execute(
-        text(
-            """
-            CREATE TABLE IF NOT EXISTS api_provider_config (
-              provider VARCHAR(64) PRIMARY KEY,
-              quota_daily INTEGER NOT NULL DEFAULT 0,
-              cost_per_request NUMERIC(12, 6) NOT NULL DEFAULT 0,
-              currency VARCHAR(8) NOT NULL DEFAULT 'USD',
-              is_active BOOLEAN NOT NULL DEFAULT TRUE,
-              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-    )
-    db_user.execute(
-        text(
-            """
-            CREATE TABLE IF NOT EXISTS api_key_registry (
-              key_name VARCHAR(128) PRIMARY KEY,
-              provider VARCHAR(64) NOT NULL,
-              status VARCHAR(24) NOT NULL DEFAULT 'active',
-              key_last4 VARCHAR(8),
-              last_used_at TIMESTAMP NULL,
-              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-    )
-    db_user.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS idx_api_request_logs_created_at ON api_request_logs (created_at)"
-        )
-    )
-    db_user.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS idx_api_request_logs_path ON api_request_logs (path)"
-        )
-    )
-    db_user.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS idx_api_request_logs_status_code ON api_request_logs (status_code)"
-        )
-    )
-    db_user.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS idx_api_key_registry_provider ON api_key_registry (provider)"
-        )
-    )
-    db_user.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS idx_api_key_registry_last_used_at ON api_key_registry (last_used_at)"
-        )
-    )
-    db_user.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS idx_api_provider_config_active ON api_provider_config (is_active)"
-        )
-    )
-    default_provider_configs = [
-        ("Chat", 200000, 0.0025),
-        ("Amadeus", 120000, 0.0035),
-        ("SerpAPI", 80000, 0.0050),
-        ("Sessions", 250000, 0.0),
-        ("Trips", 100000, 0.0),
-        ("Price Alerts", 100000, 0.0),
-        ("OpenWeather", 50000, 0.0010),
-        ("Google Maps", 70000, 0.0020),
-        ("FlightAware", 20000, 0.0120),
-        ("Auth", 150000, 0.0004),
-        ("Health", 500000, 0.0),
-        ("Internal", 500000, 0.0),
-    ]
-    for provider, quota_daily, cost_per_request in default_provider_configs:
-        db_user.execute(
-            text(
-                """
-                INSERT INTO api_provider_config (provider, quota_daily, cost_per_request, currency, is_active, updated_at)
-                VALUES (:provider, :quota_daily, :cost_per_request, 'USD', TRUE, NOW())
-                ON CONFLICT (provider) DO NOTHING
-                """
-            ),
-            {
-                "provider": provider,
-                "quota_daily": quota_daily,
-                "cost_per_request": cost_per_request,
-            },
-        )
-    db_user.commit()
-
+    ensure_api_monitoring_infra()
     now = datetime.utcnow()
-    window_map = {"1h": timedelta(hours=1), "6h": timedelta(hours=6), "24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30)}
-    since = now - window_map.get(window, timedelta(hours=24))
-    base_query = (
-        db_user.query(ApiRequestLog)
-        .filter(ApiRequestLog.created_at >= since)
-        .filter(~ApiRequestLog.path.like("/api/admin/api-monitoring%"))
-        .filter(~ApiRequestLog.path.like("/api/admin/api-keys%"))
-    )
+    since = now - _monitoring_window_delta(window)
+    daily_since = now - timedelta(hours=24)
+    monitored_providers = list(MONITORED_EXTERNAL_PROVIDERS)
+    external_scope_filters = _external_api_scope_filters()
+    base_filters = [ApiRequestLog.created_at >= since, *external_scope_filters]
     if provider:
-        base_query = base_query.filter(ApiRequestLog.provider == provider)
+        base_filters.append(ApiRequestLog.provider == provider)
     if endpoint:
-        base_query = base_query.filter(ApiRequestLog.path.ilike(f"%{endpoint}%"))
+        base_filters.append(ApiRequestLog.path.ilike(f"%{endpoint}%"))
     if status == "failed":
-        base_query = base_query.filter(ApiRequestLog.status_code >= 400)
+        base_filters.append(ApiRequestLog.status_code >= 400)
     elif status == "success":
-        base_query = base_query.filter(ApiRequestLog.status_code < 400)
+        base_filters.append(ApiRequestLog.status_code < 400)
 
-    logs = base_query.order_by(ApiRequestLog.created_at.desc()).limit(10000).all()
+    failed_case = case((ApiRequestLog.status_code >= 400, 1), else_=0)
+    totals_row = (
+        db_user.query(
+            func.count(ApiRequestLog.id).label("total_requests"),
+            func.coalesce(func.avg(ApiRequestLog.latency_ms), 0).label("avg_latency_ms"),
+            func.coalesce(func.sum(failed_case), 0).label("failed_requests"),
+        )
+        .filter(*base_filters)
+        .one()
+    )
 
-    total_requests = len(logs)
-    failed_requests = sum(1 for log in logs if (log.status_code or 0) >= 400)
-    avg_latency_ms = round(sum((log.latency_ms or 0) for log in logs) / total_requests) if total_requests else 0
+    total_requests = int(totals_row.total_requests or 0)
+    failed_requests = int(totals_row.failed_requests or 0)
+    avg_latency_ms = round(float(totals_row.avg_latency_ms or 0))
     error_rate_pct = round((failed_requests / total_requests) * 100, 2) if total_requests else 0
     uptime_pct = round(100 - error_rate_pct, 2) if total_requests else 100
 
-    endpoint_stats: dict[str, dict[str, Any]] = {}
-    provider_counter: Counter[str] = Counter()
-    key_counter: Counter[str] = Counter()
-    hourly_requests: Counter[str] = Counter()
-    hourly_errors: Counter[str] = Counter()
-
-    for log in logs:
-        endpoint_key = f"{log.method} {log.path}"
-        endpoint = endpoint_stats.setdefault(
-            endpoint_key,
-            {
-                "name": endpoint_key,
-                "provider": log.provider or "Internal",
-                "endpoint": log.path,
-                "requests24h": 0,
-                "total_latency": 0,
-                "error_count": 0,
-            },
+    provider_expr = ApiRequestLog.provider
+    endpoint_stats = (
+        db_user.query(
+            ApiRequestLog.method.label("method"),
+            ApiRequestLog.path.label("path"),
+            provider_expr.label("provider"),
+            func.count(ApiRequestLog.id).label("request_count"),
+            func.coalesce(func.avg(ApiRequestLog.latency_ms), 0).label("avg_latency_ms"),
+            func.coalesce(func.sum(failed_case), 0).label("error_count"),
         )
-        endpoint["requests24h"] += 1
-        endpoint["total_latency"] += int(log.latency_ms or 0)
-        if (log.status_code or 0) >= 400:
-            endpoint["error_count"] += 1
+        .filter(*base_filters)
+        .group_by(ApiRequestLog.method, ApiRequestLog.path, provider_expr)
+        .all()
+    )
 
-        provider_counter[log.provider or "Internal"] += 1
-        if log.api_key_name:
-            key_counter[log.api_key_name] += 1
-
-        label = (log.created_at or now).strftime("%H:00")
-        hourly_requests[label] += 1
-        if (log.status_code or 0) >= 400:
-            hourly_errors[label] += 1
-
-    endpoint_rows = []
-    for idx, endpoint in enumerate(
-        sorted(endpoint_stats.values(), key=lambda row: row["requests24h"], reverse=True)[:30]
-    ):
-        req = endpoint["requests24h"] or 1
-        avg = round(endpoint["total_latency"] / req)
-        err_pct = round((endpoint["error_count"] / req) * 100, 2)
-        status = "healthy"
-        if err_pct > 2 or avg > 1500:
-            status = "error"
-        elif err_pct > 0.5 or avg > 700:
-            status = "slow"
-        endpoint_rows.append(
+    all_endpoint_rows = []
+    for row in endpoint_stats:
+        request_count = int(row.request_count or 0)
+        avg_ms = round(float(row.avg_latency_ms or 0))
+        error_count = int(row.error_count or 0)
+        error_pct = round((error_count / request_count) * 100, 2) if request_count else 0.0
+        endpoint_status = "healthy"
+        if error_pct > 2 or avg_ms > 1500:
+            endpoint_status = "error"
+        elif error_pct > 0.5 or avg_ms > 700:
+            endpoint_status = "slow"
+        all_endpoint_rows.append(
             {
-                "id": f"endpoint-{idx}",
-                "name": endpoint["name"],
-                "provider": endpoint["provider"],
-                "endpoint": endpoint["endpoint"],
-                "status": status,
-                "requests24h": req,
-                "avgResponseTimeMs": avg,
-                "p95Ms": round(avg * 1.35),
-                "p99Ms": round(avg * 1.8),
-                "errorRatePct": err_pct,
-                "uptimePct": round(100 - err_pct, 2),
+                "name": f"{row.method} {row.path}",
+                "provider": row.provider or "Internal",
+                "endpoint": row.path,
+                "status": endpoint_status,
+                "requests24h": request_count,
+                "avgResponseTimeMs": avg_ms,
+                "p95Ms": round(avg_ms * 1.35),
+                "p99Ms": round(avg_ms * 1.8),
+                "errorRatePct": error_pct,
+                "uptimePct": round(100 - error_pct, 2),
             }
         )
-
-    request_volume = [
-        {"label": f"{hour:02d}:00", "requests": hourly_requests.get(f"{hour:02d}:00", 0)}
-        for hour in range(24)
-    ] if window in ("24h", "7d", "30d") else [
-        {"label": minute.strftime("%H:%M"), "requests": 0}
-        for minute in [now - timedelta(minutes=i) for i in range(59, -1, -1)]
-    ]
-    error_rate_trend = [
+    all_endpoint_rows.sort(key=lambda item: item["requests24h"], reverse=True)
+    endpoint_rows = [
         {
-            "label": row["label"],
-            "rate": round(
-                (hourly_errors.get(row["label"], 0) / max(row["requests"], 1)) * 100,
-                2,
-            ),
+            **row,
+            "id": f"endpoint-{index}",
         }
-        for row in request_volume
+        for index, row in enumerate(all_endpoint_rows[:30])
     ]
 
+    chart_granularity, chart_start, chart_step, chart_count, label_format = _monitoring_chart_config(window, now)
+    chart_filters = [ApiRequestLog.created_at >= chart_start, *external_scope_filters]
+    if provider:
+        chart_filters.append(ApiRequestLog.provider == provider)
+    if endpoint:
+        chart_filters.append(ApiRequestLog.path.ilike(f"%{endpoint}%"))
+    if status == "failed":
+        chart_filters.append(ApiRequestLog.status_code >= 400)
+    elif status == "success":
+        chart_filters.append(ApiRequestLog.status_code < 400)
+
+    bucket_expr = func.date_trunc(chart_granularity, ApiRequestLog.created_at).label("bucket_start")
+    volume_rows = (
+        db_user.query(
+            bucket_expr,
+            func.count(ApiRequestLog.id).label("requests"),
+            func.coalesce(func.sum(failed_case), 0).label("errors"),
+        )
+        .filter(*chart_filters)
+        .group_by(bucket_expr)
+        .order_by(bucket_expr)
+        .all()
+    )
+    request_volume, error_rate_trend = _build_monitoring_volume_series(
+        volume_rows,
+        bucket_start=chart_start,
+        bucket_step=chart_step,
+        bucket_count=chart_count,
+        label_format=label_format,
+    )
+
+    provider_usage_rows = (
+        db_user.query(provider_expr.label("provider"), func.count(ApiRequestLog.id).label("requests"))
+        .filter(*base_filters)
+        .group_by(provider_expr)
+        .order_by(func.count(ApiRequestLog.id).desc())
+        .limit(8)
+        .all()
+    )
     provider_usage = [
-        {"provider": provider, "requests": count}
-        for provider, count in provider_counter.most_common(8)
+        {"provider": row.provider or "Internal", "requests": int(row.requests or 0)}
+        for row in provider_usage_rows
     ]
     provider_config_rows = db_user.execute(
         text(
@@ -4841,19 +5213,31 @@ async def admin_api_monitoring(
             SELECT provider, quota_daily, cost_per_request, currency, is_active
             FROM api_provider_config
             WHERE is_active = TRUE
+              AND provider IN :providers
             """
-        )
+        ).bindparams(bindparam("providers", expanding=True)),
+        {"providers": monitored_providers},
     ).fetchall()
     provider_config_map = {row.provider: row for row in provider_config_rows}
 
+    daily_provider_rows = (
+        db_user.query(ApiRequestLog.provider, func.count(ApiRequestLog.id))
+        .filter(ApiRequestLog.created_at >= daily_since)
+        .filter(*external_scope_filters)
+        .group_by(ApiRequestLog.provider)
+        .all()
+    )
+    daily_provider_usage = {provider: count for provider, count in daily_provider_rows}
+
     rate_limits = []
-    for provider, usage in provider_counter.items():
-        cfg = provider_config_map.get(provider)
+    for external_provider in MONITORED_EXTERNAL_PROVIDERS:
+        cfg = provider_config_map.get(external_provider)
+        usage = daily_provider_usage.get(external_provider, 0)
         quota = int(cfg.quota_daily) if cfg else 0
         pct = round((usage / quota) * 100, 2) if quota > 0 else 0.0
         rate_limits.append(
             {
-                "provider": provider,
+                "provider": external_provider,
                 "used": usage,
                 "quota": quota,
                 "percentUsed": pct,
@@ -4865,22 +5249,58 @@ async def admin_api_monitoring(
     monthly_logs = (
         db_user.query(ApiRequestLog.provider, func.count(ApiRequestLog.id))
         .filter(ApiRequestLog.created_at >= month_start)
-        .filter(~ApiRequestLog.path.like("/api/admin/api-monitoring%"))
-        .filter(~ApiRequestLog.path.like("/api/admin/api-keys%"))
+        .filter(*external_scope_filters)
         .group_by(ApiRequestLog.provider)
         .all()
     )
-    monthly_usage = {provider or "Internal": count for provider, count in monthly_logs}
+    monthly_usage = {provider: count for provider, count in monthly_logs}
+
+    external_window_logs = (
+        db_user.query(
+            ApiRequestLog.provider,
+            func.count(ApiRequestLog.id).label("requests"),
+            func.coalesce(func.sum(failed_case), 0).label("failed"),
+        )
+        .filter(ApiRequestLog.created_at >= since)
+        .filter(*external_scope_filters)
+        .group_by(ApiRequestLog.provider)
+        .all()
+    )
+    external_window_usage = {
+        row.provider: {
+            "requests": int(row.requests or 0),
+            "failed": int(row.failed or 0),
+        }
+        for row in external_window_logs
+    }
+    external_daily_logs = (
+        db_user.query(ApiRequestLog.provider, func.count(ApiRequestLog.id))
+        .filter(ApiRequestLog.created_at >= daily_since)
+        .filter(*external_scope_filters)
+        .group_by(ApiRequestLog.provider)
+        .all()
+    )
+    external_daily_usage = {provider: count for provider, count in external_daily_logs}
+    external_monthly_logs = (
+        db_user.query(ApiRequestLog.provider, func.count(ApiRequestLog.id))
+        .filter(ApiRequestLog.created_at >= month_start)
+        .filter(*external_scope_filters)
+        .group_by(ApiRequestLog.provider)
+        .all()
+    )
+    external_monthly_usage = {provider: count for provider, count in external_monthly_logs}
+
     cost_breakdown = []
     total_monthly_cost = 0.0
-    for provider, count in monthly_usage.items():
-        cfg = provider_config_map.get(provider)
+    for external_provider in MONITORED_EXTERNAL_PROVIDERS:
+        count = int(monthly_usage.get(external_provider, 0) or 0)
+        cfg = provider_config_map.get(external_provider)
         cost_per_request = float(cfg.cost_per_request) if cfg else 0.0
         provider_cost = round(count * cost_per_request, 4)
         total_monthly_cost += provider_cost
         cost_breakdown.append(
             {
-                "provider": provider,
+                "provider": external_provider,
                 "requests": count,
                 "costPerRequest": cost_per_request,
                 "monthlyCost": round(provider_cost, 2),
@@ -4888,38 +5308,93 @@ async def admin_api_monitoring(
         )
     cost_breakdown.sort(key=lambda row: row["monthlyCost"], reverse=True)
 
-    key_usage_24h = {key_name: count for key_name, count in key_counter.items()}
+    key_usage_rows_24h = (
+        db_user.query(ApiRequestLog.api_key_name, func.count(ApiRequestLog.id))
+        .filter(ApiRequestLog.created_at >= daily_since)
+        .filter(*external_scope_filters)
+        .filter(ApiRequestLog.api_key_name.isnot(None))
+        .group_by(ApiRequestLog.api_key_name)
+        .all()
+    )
+    key_usage_24h = {key_name: count for key_name, count in key_usage_rows_24h}
     key_rows = db_user.execute(
         text(
             """
             SELECT key_name, provider, status, key_last4, last_used_at
             FROM api_key_registry
+            WHERE provider IN :providers
             ORDER BY last_used_at DESC NULLS LAST
             LIMIT 20
             """
-        )
+        ).bindparams(bindparam("providers", expanding=True)),
+        {"providers": monitored_providers},
     ).fetchall()
-    api_keys = [
-        {
-            "provider": row.provider,
-            "keyName": row.key_name,
-            "status": row.status,
-            "lastUsed": row.last_used_at.isoformat() if row.last_used_at else None,
-            "keyLast4": row.key_last4,
-            "requests24h": key_usage_24h.get(row.key_name, 0),
-            "quotaDaily": int(provider_config_map.get(row.provider).quota_daily)
-            if provider_config_map.get(row.provider) is not None
-            else 0,
-            "costPerRequest": float(provider_config_map.get(row.provider).cost_per_request)
-            if provider_config_map.get(row.provider) is not None
-            else 0.0,
-            "currency": provider_config_map.get(row.provider).currency
-            if provider_config_map.get(row.provider) is not None
-            else "USD",
-        }
-        for row in key_rows
-    ]
+    key_row_by_provider = {}
+    for row in key_rows:
+        if row.provider not in key_row_by_provider:
+            key_row_by_provider[row.provider] = row
+    api_keys = []
+    for external_provider in MONITORED_EXTERNAL_PROVIDERS:
+        key_row = key_row_by_provider.get(external_provider)
+        provider_cfg = provider_config_map.get(external_provider)
+        key_name = (key_row.key_name if key_row else None) or PROVIDER_KEY_NAMES.get(external_provider) or external_provider
+        api_keys.append(
+            {
+                "provider": external_provider,
+                "keyName": key_name,
+                "status": key_row.status if key_row else "unknown",
+                "lastUsed": key_row.last_used_at.isoformat() if key_row and key_row.last_used_at else None,
+                "keyLast4": key_row.key_last4 if key_row else None,
+                "requests24h": key_usage_24h.get(key_name, 0),
+                "quotaDaily": int(provider_cfg.quota_daily) if provider_cfg is not None else 0,
+                "costPerRequest": float(provider_cfg.cost_per_request) if provider_cfg is not None else 0.0,
+                "currency": provider_cfg.currency if provider_cfg is not None else "USD",
+            }
+        )
 
+    external_provider_usage = []
+    for external_provider in MONITORED_EXTERNAL_PROVIDERS:
+        cfg = provider_config_map.get(external_provider)
+        key_row = key_row_by_provider.get(external_provider)
+        quota = int(cfg.quota_daily) if cfg else 0
+        requests_24h = external_daily_usage.get(external_provider, 0)
+        window_usage = external_window_usage.get(external_provider, {"requests": 0, "failed": 0})
+        requests_window = int(window_usage["requests"])
+        failed_window = int(window_usage["failed"])
+        success_window = max(requests_window - failed_window, 0)
+        requests_month = external_monthly_usage.get(external_provider, 0)
+        cost_per_request = float(cfg.cost_per_request) if cfg else 0.0
+        percent_used = round((requests_24h / quota) * 100, 2) if quota > 0 else 0.0
+        remaining = max(quota - requests_24h, 0) if quota > 0 else 0
+        external_provider_usage.append(
+            {
+                "provider": external_provider,
+                "requestsWindow": requests_window,
+                "requests24h": requests_24h,
+                "successWindow": success_window,
+                "failedWindow": failed_window,
+                "monthlyRequests": requests_month,
+                "quota": quota,
+                "percentUsed": percent_used,
+                "remaining": remaining,
+                "keyName": key_row.key_name if key_row else PROVIDER_KEY_NAMES.get(external_provider),
+                "status": key_row.status if key_row else "unknown",
+                "lastUsed": key_row.last_used_at.isoformat() if key_row and key_row.last_used_at else None,
+                "keyLast4": key_row.key_last4 if key_row else None,
+                "costPerRequest": cost_per_request,
+                "monthlyCost": round(requests_month * cost_per_request, 2),
+                "currency": cfg.currency if cfg else "USD",
+            }
+        )
+
+    recent_error_filters = [*base_filters, ApiRequestLog.status_code >= 400]
+    recent_error_logs = (
+        db_user.query(ApiRequestLog)
+        .filter(*recent_error_filters)
+        .order_by(ApiRequestLog.created_at.desc())
+        .limit(25)
+        .all()
+    )
     recent_errors = [
         {
             "id": str(log.id),
@@ -4928,9 +5403,8 @@ async def admin_api_monitoring(
             "error": log.error_message or f"HTTP {log.status_code}",
             "statusCode": log.status_code,
         }
-        for log in logs
-        if (log.status_code or 0) >= 400
-    ][:25]
+        for log in recent_error_logs
+    ]
 
     return {
         "generated_at": now.isoformat(),
@@ -4940,13 +5414,14 @@ async def admin_api_monitoring(
             "avg_latency_ms": avg_latency_ms,
             "error_rate_pct": error_rate_pct,
             "uptime_pct": uptime_pct,
-            "active_endpoints": len([row for row in endpoint_rows if row["status"] == "healthy"]),
-            "total_endpoints": len(endpoint_rows),
+            "active_endpoints": len([row for row in all_endpoint_rows if row["status"] == "healthy"]),
+            "total_endpoints": len(all_endpoint_rows),
         },
         "endpoint_rows": endpoint_rows,
         "request_volume": request_volume,
         "error_rate_trend": error_rate_trend,
         "provider_usage": provider_usage,
+        "external_provider_usage": external_provider_usage,
         "success_failed": {
             "success": max(total_requests - failed_requests, 0),
             "failed": failed_requests,
@@ -4956,7 +5431,7 @@ async def admin_api_monitoring(
         "cost_monitoring": {
             "currency": "USD",
             "total_monthly_cost": round(total_monthly_cost, 2),
-            "avg_cost_per_request": round(total_monthly_cost / max(sum(monthly_usage.values()), 1), 6),
+            "avg_cost_per_request": round(total_monthly_cost / max(sum(external_monthly_usage.values()), 1), 6),
             "monthly_breakdown": cost_breakdown,
         },
         "recent_errors": recent_errors,
@@ -4968,6 +5443,7 @@ async def admin_api_keys(
     _: None = Depends(require_admin),
     db_user: Session = Depends(get_user_db),
 ):
+    ensure_api_monitoring_infra()
     rows = db_user.execute(
         text(
             """
@@ -5009,6 +5485,7 @@ async def admin_update_api_key(
     _: None = Depends(require_admin),
     db_user: Session = Depends(get_user_db),
 ):
+    ensure_api_monitoring_infra()
     if payload.status and payload.status not in {"active", "disabled", "rotating"}:
         raise HTTPException(status_code=400, detail="Invalid status")
 

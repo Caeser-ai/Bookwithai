@@ -36,6 +36,36 @@ export type BackendAdminSessionsResponse = {
   sessions: BackendAdminSessionSummary[];
 };
 
+export type BackendAdminAuthUser = {
+  id: string;
+  username: string;
+  email: string | null;
+  fullName: string;
+  role: string;
+  isActive: boolean;
+  lastLoginAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+export type BackendAdminAuthSessionResponse = {
+  accessToken: string;
+  expiresInSeconds: number;
+  admin: BackendAdminAuthUser;
+};
+
+export type BackendAdminAuthMeResponse = {
+  admin: BackendAdminAuthUser;
+};
+
+export type BackendAdminSetupStatusResponse = {
+  needsSetup: boolean;
+};
+
+export type BackendAdminUsersResponse = {
+  admins: BackendAdminAuthUser[];
+};
+
 export type BackendAdminFeedbackSummary = {
   id: string;
   created_at: string | null;
@@ -141,6 +171,30 @@ export type AdminConversationCard = {
   lastUpdatedLabel: string;
   lastMessagePreview: string;
   messages: AdminConversationMessage[];
+};
+
+export type AdminAuthUser = {
+  id: string;
+  username: string;
+  email: string | null;
+  fullName: string;
+  role: string;
+  isActive: boolean;
+  lastLoginAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+export type AdminAuthMeResponse = {
+  admin: AdminAuthUser;
+};
+
+export type AdminSetupStatusResponse = {
+  needsSetup: boolean;
+};
+
+export type AdminUsersListResponse = {
+  admins: AdminAuthUser[];
 };
 
 export type AdminOverviewResponse = {
@@ -645,6 +699,24 @@ export type BackendAdminApiMonitoringResponse = {
   request_volume: Array<{ label: string; requests: number }>;
   error_rate_trend: Array<{ label: string; rate: number }>;
   provider_usage: Array<{ provider: string; requests: number }>;
+  external_provider_usage: Array<{
+    provider: string;
+    requestsWindow: number;
+    requests24h: number;
+    successWindow: number;
+    failedWindow: number;
+    monthlyRequests: number;
+    quota: number;
+    percentUsed: number;
+    remaining: number;
+    keyName: string | null;
+    status: string;
+    lastUsed: string | null;
+    keyLast4?: string | null;
+    costPerRequest: number;
+    monthlyCost: number;
+    currency: string;
+  }>;
   success_failed: { success: number; failed: number };
   api_keys: Array<{
     provider: string;
@@ -1092,6 +1164,27 @@ export type AdminApiMonitoringResponse = {
   requestVolume: Array<{ label: string; requests: number }>;
   errorRateTrend: Array<{ label: string; rate: number }>;
   providerUsage: Array<{ provider: string; requests: number; color: string }>;
+  externalProviderUsage: Array<{
+    provider: string;
+    label: string;
+    description: string;
+    requestsWindow: number;
+    requests24h: number;
+    successWindow: number;
+    failedWindow: number;
+    monthlyRequests: number;
+    quota: number;
+    percentUsed: number;
+    remaining: number;
+    keyName: string | null;
+    status: string;
+    lastUsed: string | null;
+    keyLast4?: string | null;
+    costPerRequest: number;
+    monthlyCost: number;
+    currency: string;
+    color: string;
+  }>;
   successFailed: { success: number; failed: number };
   apiKeys: Array<{
     provider: string;

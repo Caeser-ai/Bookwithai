@@ -1,4 +1,6 @@
 import {
+  BackendAdminAuthMeResponse,
+  BackendAdminAuthSessionResponse,
   BackendAdminApiMonitoringResponse,
   BackendAdminAiPerformanceResponse,
   BackendAdminBehaviorResponse,
@@ -8,11 +10,15 @@ import {
   BackendAdminFunnelResponse,
   BackendAdminMetricsOverviewResponse,
   BackendAdminRetentionResponse,
+  BackendAdminSetupStatusResponse,
   BackendAdminSessionDetail,
   BackendAdminSessionsResponse,
+  BackendAdminUsersResponse,
   BackendAdminUsersAnalyticsResponse,
   UiFeedbackStatus,
 } from "@/lib/admin-types";
+import { cookies } from "next/headers";
+import { ADMIN_SESSION_COOKIE } from "@/lib/admin-session";
 
 export class AdminBackendError extends Error {
   status: number;
@@ -45,23 +51,26 @@ function buildBackendUrl(base: string, path: string): string {
   return `${normalizedBase}${normalizedPath}`;
 }
 
-function getBackendConfig() {
+type AdminBackendAuthMode = "session" | "none";
+
+async function getBackendConfig(authMode: AdminBackendAuthMode) {
   const baseUrl =
     process.env.ADMIN_BACKEND_URL ??
     process.env.BACKEND_URL ??
     process.env.NEXT_PUBLIC_BACKEND_API_BASE ??
     process.env.NEXT_PUBLIC_BACKEND_URL ??
     "https://bookwithai-t9b1.vercel.app/";
-  const adminToken = process.env.ADMIN_TOKEN ?? process.env.BACKEND_ADMIN_TOKEN;
+  let accessToken: string | null = null;
 
-  if (!adminToken) {
-    throw new AdminBackendError(
-      "ADMIN_TOKEN is missing. Set the same ADMIN_TOKEN value in Admin-Dashboard/Frontend/.env.local and the Website/backend environment.",
-      500,
-    );
+  if (authMode === "session") {
+    const cookieStore = await cookies();
+    accessToken = cookieStore.get(ADMIN_SESSION_COOKIE)?.value ?? null;
+    if (!accessToken) {
+      throw new AdminBackendError("Not authenticated", 401);
+    }
   }
 
-  return { baseUrl, adminToken };
+  return { baseUrl, accessToken };
 }
 
 function getBackendTimeoutMs(): number {
@@ -85,13 +94,16 @@ function summarizeText(value: string, limit = 240): string {
 export async function fetchAdminBackend<T>(
   path: string,
   init?: RequestInit,
+  authMode: AdminBackendAuthMode = "session",
 ): Promise<T> {
-  const { baseUrl, adminToken } = getBackendConfig();
+  const { baseUrl, accessToken } = await getBackendConfig(authMode);
   const timeoutMs = getBackendTimeoutMs();
   const requestUrl = buildBackendUrl(baseUrl, path);
   const headers = new Headers(init?.headers);
   headers.set("accept", "application/json");
-  headers.set("x-admin-token", adminToken);
+  if (accessToken) {
+    headers.set("authorization", `Bearer ${accessToken}`);
+  }
 
   if (init?.body && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
@@ -269,6 +281,79 @@ export async function getAdminApiMonitoring(days?: number) {
 export async function getBackendHealth() {
   return fetchAdminBackend<{ status?: string; version?: string; service?: string }>(
     "/api/health",
+    undefined,
+    "none",
+  );
+}
+
+export async function getAdminSetupStatus() {
+  return fetchAdminBackend<BackendAdminSetupStatusResponse>(
+    "/api/admin/auth/setup-status",
+    undefined,
+    "none",
+  );
+}
+
+export async function signInAdmin(payload: { username: string; password: string }) {
+  return fetchAdminBackend<BackendAdminAuthSessionResponse>(
+    "/api/admin/auth/sign-in",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    "none",
+  );
+}
+
+export async function bootstrapAdmin(payload: {
+  username: string;
+  full_name: string;
+  email: string;
+  password: string;
+}) {
+  return fetchAdminBackend<BackendAdminAuthSessionResponse>(
+    "/api/admin/auth/bootstrap",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    "none",
+  );
+}
+
+export async function getCurrentAdmin() {
+  return fetchAdminBackend<BackendAdminAuthMeResponse>("/api/admin/auth/me");
+}
+
+export async function updateCurrentAdmin(payload: {
+  username: string;
+  full_name: string;
+  email: string;
+  current_password?: string;
+  new_password?: string;
+}) {
+  return fetchAdminBackend<BackendAdminAuthMeResponse>("/api/admin/account", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getAdminUsers() {
+  return fetchAdminBackend<BackendAdminUsersResponse>("/api/admin/admin-users");
+}
+
+export async function createAdminUser(payload: {
+  username: string;
+  full_name: string;
+  email: string;
+  password: string;
+}) {
+  return fetchAdminBackend<{ admin: BackendAdminUsersResponse["admins"][number] }>(
+    "/api/admin/admin-users",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
   );
 }
 

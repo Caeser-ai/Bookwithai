@@ -104,10 +104,10 @@ export function RedirectAnalytics() {
           </div>
           {/* Country/device filters disabled: redirect view has no direct
               country/device-attributed redirect metrics in current payload. */}
-          <div className="ml-auto rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          {/* <div className="ml-auto rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
             Average flight price and browser/device redirect cuts are not available in the current
             data model.
-          </div>
+          </div> */}
         </div>
       </div>
 

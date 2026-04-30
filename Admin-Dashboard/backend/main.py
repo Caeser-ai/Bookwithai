@@ -4,7 +4,6 @@ import os
 import re
 import time
 import uuid
-from threading import Lock
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
@@ -13,6 +12,7 @@ from api.routes import router as api_router
 from sqlalchemy import text
 
 from database import SessionUser, engine_user
+from services.external_api_monitoring import ensure_api_monitoring_infra
 
 logger = logging.getLogger(__name__)
 
@@ -73,98 +73,7 @@ app.add_middleware(
 
 app.include_router(api_router, prefix="/api")
 
-_MONITORING_TABLE_READY = False
-_MONITORING_LOCK = Lock()
 _HASH_RE = re.compile(r"^[A-Za-z0-9_\-]{20,}$")
-
-
-def _ensure_monitoring_table() -> None:
-    global _MONITORING_TABLE_READY
-    if _MONITORING_TABLE_READY or engine_user is None:
-        return
-    with _MONITORING_LOCK:
-        if _MONITORING_TABLE_READY or engine_user is None:
-            return
-        with engine_user.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    CREATE TABLE IF NOT EXISTS api_request_logs (
-                      id UUID PRIMARY KEY,
-                      request_id VARCHAR(64),
-                      method VARCHAR(16) NOT NULL,
-                      path VARCHAR(255) NOT NULL,
-                      status_code INTEGER NOT NULL,
-                      latency_ms INTEGER NOT NULL,
-                      query_params JSONB,
-                      provider VARCHAR(64),
-                      api_key_name VARCHAR(128),
-                      api_key_last4 VARCHAR(8),
-                      user_id VARCHAR(64),
-                      client_ip VARCHAR(64),
-                      user_agent TEXT,
-                      error_message TEXT,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
-            )
-            conn.execute(
-                text(
-                    """
-                    CREATE TABLE IF NOT EXISTS api_metrics_1m (
-                      bucket_start TIMESTAMP NOT NULL,
-                      method VARCHAR(16) NOT NULL,
-                      path VARCHAR(255) NOT NULL,
-                      provider VARCHAR(64) NOT NULL,
-                      request_count INTEGER NOT NULL DEFAULT 0,
-                      success_count INTEGER NOT NULL DEFAULT 0,
-                      error_count INTEGER NOT NULL DEFAULT 0,
-                      total_latency_ms BIGINT NOT NULL DEFAULT 0,
-                      max_latency_ms INTEGER NOT NULL DEFAULT 0,
-                      PRIMARY KEY (bucket_start, method, path, provider)
-                    )
-                    """
-                )
-            )
-            conn.execute(
-                text(
-                    """
-                    CREATE TABLE IF NOT EXISTS api_key_registry (
-                      key_name VARCHAR(128) PRIMARY KEY,
-                      provider VARCHAR(64) NOT NULL,
-                      status VARCHAR(24) NOT NULL DEFAULT 'active',
-                      key_last4 VARCHAR(8),
-                      last_used_at TIMESTAMP NULL,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
-            )
-            conn.execute(
-                text(
-                    """
-                    CREATE TABLE IF NOT EXISTS api_provider_config (
-                      provider VARCHAR(64) PRIMARY KEY,
-                      quota_daily INTEGER NOT NULL DEFAULT 0,
-                      cost_per_request NUMERIC(12, 6) NOT NULL DEFAULT 0,
-                      currency VARCHAR(8) NOT NULL DEFAULT 'USD',
-                      is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
-            )
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_request_logs_created_at ON api_request_logs (created_at)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_request_logs_path ON api_request_logs (path)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_request_logs_status_code ON api_request_logs (status_code)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_key_registry_provider ON api_key_registry (provider)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_key_registry_last_used_at ON api_key_registry (last_used_at)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_provider_config_active ON api_provider_config (is_active)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_metrics_1m_bucket_start ON api_metrics_1m (bucket_start)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_api_metrics_1m_path ON api_metrics_1m (path)"))
-        _MONITORING_TABLE_READY = True
 
 
 def _provider_for_path(path: str) -> str:
@@ -172,23 +81,19 @@ def _provider_for_path(path: str) -> str:
     if p.startswith("/api/admin/"):
         return "Admin"
     if "/chat" in p or "/ai/" in p:
-        return "Chat"
+        return "Chat Endpoint"
+    if "/flights" in p:
+        return "Flights API"
     if "/sessions" in p:
         return "Sessions"
     if "/price-alert" in p or "/price_alert" in p or "/alert" in p:
         return "Price Alerts"
     if "/trip" in p:
         return "Trips"
-    if "serp" in p:
-        return "SerpAPI"
-    if "amadeus" in p or "flight-search" in p or "/flights" in p:
-        return "Amadeus"
     if "weather" in p:
-        return "OpenWeather"
+        return "Weather Endpoint"
     if "map" in p or "geocode" in p or "directions" in p:
-        return "Google Maps"
-    if "flightaware" in p:
-        return "FlightAware"
+        return "Maps Endpoint"
     if "auth" in p or "register" in p or "login" in p or "otp" in p:
         return "Auth"
     if "/health" in p:
@@ -196,26 +101,24 @@ def _provider_for_path(path: str) -> str:
     if "/frontend" in p:
         return "Frontend"
     if "/api/" in p:
-        return "OpenAI"
+        return "Backend"
     return "Internal"
 
 
 def _key_name_for_provider(provider: str) -> str:
     mapping = {
         "Admin": "ADMIN_API_TOKEN",
-        "Chat": "OPENAI_API_KEY",
+        "Chat Endpoint": "CHAT_SERVICE",
+        "Flights API": "FLIGHTS_SERVICE",
         "Sessions": "SESSION_SERVICE",
         "Trips": "TRIP_SERVICE",
         "Price Alerts": "PRICE_ALERT_SERVICE",
-        "SerpAPI": "SERPAPI_API_KEY",
-        "Amadeus": "AMADEUS_CLIENT_SECRET",
-        "OpenWeather": "OPENWEATHER_API_KEY",
-        "Google Maps": "GOOGLE_MAPS_API_KEY",
-        "FlightAware": "FLIGHTAWARE_API_KEY",
+        "Weather Endpoint": "WEATHER_SERVICE",
+        "Maps Endpoint": "MAPS_SERVICE",
         "Auth": "JWT_SECRET",
         "Health": "HEALTH_PROBE",
         "Frontend": "FRONTEND_PROXY",
-        "OpenAI": "OPENAI_API_KEY",
+        "Backend": "INTERNAL_BACKEND",
         "Internal": "INTERNAL_BACKEND",
     }
     return mapping.get(provider, "INTERNAL_BACKEND")
@@ -259,8 +162,8 @@ async def api_request_logging(request: Request, call_next) -> Response:
         if path.startswith("/api/"):
             latency_ms = max(int((time.perf_counter() - started) * 1000), 0)
             try:
-                _ensure_monitoring_table()
-                if _MONITORING_TABLE_READY and engine_user is not None:
+                ensure_api_monitoring_infra()
+                if engine_user is not None:
                     provider = _provider_for_path(path)
                     key_name = _key_name_for_provider(provider)
                     auth_header = request.headers.get("authorization")

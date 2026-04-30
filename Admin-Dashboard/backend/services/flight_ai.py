@@ -7,6 +7,8 @@ from typing import Any, Dict, Iterable, List, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from services.external_api_monitoring import monitored_openai_chat_completion
+
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -701,7 +703,9 @@ Rules:
 - Be realistic about which airlines fly this route
 - Return ONLY valid JSON array, no markdown or extra text"""
 
-    resp = client.chat.completions.create(
+    resp = monitored_openai_chat_completion(
+        client,
+        path="/external/openai/fallback-flight-suggestions",
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "You are a flight expert. Return only valid JSON arrays of flight objects."},
@@ -735,7 +739,9 @@ def chat_response(
         recent_flights=recent_flights,
     )
 
-    resp = client.chat.completions.create(
+    resp = monitored_openai_chat_completion(
+        client,
+        path="/external/openai/chat-response",
         model=CHAT_MODEL,
         messages=messages,
         temperature=0.4,
@@ -760,7 +766,9 @@ def stream_chat_response_text(
         user_city=user_city,
         recent_flights=recent_flights,
     )
-    stream = client.chat.completions.create(
+    stream = monitored_openai_chat_completion(
+        client,
+        path="/external/openai/chat-stream",
         model=CHAT_MODEL,
         messages=messages,
         temperature=0.4,
@@ -918,6 +926,8 @@ def parse_flight_search_intent(message: str, history: List[Dict[str, str]], user
                 '      "preferred_airlines": [],\n'
                 '      "excluded_airlines": [],\n'
                 '      "time_window": null,\n'
+                '      "meal_preference": null,\n'
+                '      "seat_preference": null,\n'
                 '      "airport_preference": [],\n'
                 '      "ranking_goal": "best_overall"\n'
                 "    }\n"
@@ -951,7 +961,9 @@ def parse_flight_search_intent(message: str, history: List[Dict[str, str]], user
     messages.append({"role": "user", "content": safe_message})
 
     try:
-        resp = client.chat.completions.create(
+        resp = monitored_openai_chat_completion(
+            client,
+            path="/external/openai/flight-intent",
             model=FLIGHT_INTENT_MODEL,
             messages=messages,
             temperature=0.0,
@@ -1039,6 +1051,8 @@ def parse_flight_search_intent(message: str, history: List[Dict[str, str]], user
             "preferred_airlines": (search.get("preferences") or {}).get("preferred_airlines") or [],
             "excluded_airlines": (search.get("preferences") or {}).get("excluded_airlines") or [],
             "time_window": (search.get("preferences") or {}).get("time_window"),
+            "meal_preference": (search.get("preferences") or {}).get("meal_preference"),
+            "seat_preference": (search.get("preferences") or {}).get("seat_preference"),
             "airport_preference": (search.get("preferences") or {}).get("airport_preference") or [],
             "ranking_goal": (search.get("preferences") or {}).get("ranking_goal") or "best_overall",
         },

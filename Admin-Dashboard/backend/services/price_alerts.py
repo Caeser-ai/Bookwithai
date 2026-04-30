@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from models.price_alert import PriceAlert
 from services.amadeus_client import FlightSearchParams, search_flights_amadeus
+from services.external_api_monitoring import monitored_openai_chat_completion
 from services.flight_ai import build_google_flights_url
 from services.serpapi_flights import search_flights_serpapi
 
@@ -587,7 +588,9 @@ def _generate_ai_alert_insight(
     }
 
     try:
-        response = client.chat.completions.create(
+        response = monitored_openai_chat_completion(
+            client,
+            path="/external/openai/price-alert-analysis",
             model=ALERT_ANALYSIS_MODEL,
             temperature=0.2,
             max_completion_tokens=180,
@@ -936,7 +939,9 @@ def _parse_ai_create_payload(instruction: str) -> dict[str, Any]:
         }
 
     try:
-        response = client.chat.completions.create(
+        response = monitored_openai_chat_completion(
+            client,
+            path="/external/openai/price-alert-create-patch",
             model=ALERT_EDIT_MODEL,
             temperature=0.1,
             max_completion_tokens=220,
@@ -1000,7 +1005,9 @@ def _parse_ai_edit_patch(alert: PriceAlert, instruction: str) -> dict[str, Any]:
     }
 
     try:
-        response = client.chat.completions.create(
+        response = monitored_openai_chat_completion(
+            client,
+            path="/external/openai/price-alert-edit-patch",
             model=ALERT_EDIT_MODEL,
             temperature=0.1,
             max_completion_tokens=220,

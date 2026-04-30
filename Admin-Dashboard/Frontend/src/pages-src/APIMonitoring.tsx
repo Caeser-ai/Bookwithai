@@ -60,9 +60,34 @@ export function APIMonitoring() {
       requests: trend.reduce((sum, item) => sum + item.requests, 0),
     };
   }, [data]);
+  const windowLabel = useMemo(() => {
+    if (dateRange === "15d") return "Last 15 days";
+    if (dateRange === "30d") return "Last 30 days";
+    return "Last 7 days";
+  }, [dateRange]);
+  const externalUsage = data?.externalProviderUsage ?? [];
+  const providerLabelMap = useMemo(
+    () => Object.fromEntries(externalUsage.map((item) => [item.provider, item.label])),
+    [externalUsage],
+  );
+  const providerOptions = useMemo(() => {
+    if (externalUsage.length > 0) {
+      return externalUsage.map((item) => ({
+        value: item.provider.toLowerCase(),
+        label: item.label,
+      }));
+    }
+
+    return Array.from(new Set((data?.endpointRows ?? []).map((row) => row.provider)))
+      .filter(Boolean)
+      .map((provider) => ({
+        value: provider.toLowerCase(),
+        label: provider,
+      }));
+  }, [data?.endpointRows, externalUsage]);
 
   const filteredEndpoints = (data?.endpointRows ?? []).filter((row) => {
-    if (providerFilter !== "all" && !row.provider.toLowerCase().includes(providerFilter)) {
+    if (providerFilter !== "all" && row.provider.toLowerCase() !== providerFilter) {
       return false;
     }
     if (statusFilter !== "all") {
@@ -80,11 +105,11 @@ export function APIMonitoring() {
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">API Monitoring & Management</h1>
           <p className="mt-1 text-sm text-gray-600">
-            Track API health, request volume, latency, and recent failure diagnostics.
+            Track health, request volume, latency, usage, and failures for the six monitored external providers only.
           </p>
         </div>
         <button
-          onClick={() => window.location.reload()}
+          onClick={() => void refresh()}
           className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
         >
           <RefreshCw className="h-4 w-4" />
@@ -114,9 +139,11 @@ export function APIMonitoring() {
               className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700"
             >
               <option value="all">All providers</option>
-              <option value="internal">Internal</option>
-              <option value="admin">Admin</option>
-              <option value="chat">Chat DB</option>
+              {providerOptions.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
             </select>
           </div>
           <div className="flex items-center gap-2 text-sm text-gray-600">
@@ -135,8 +162,8 @@ export function APIMonitoring() {
             <Download className="h-4 w-4" />
             Export Logs
           </button>
-          <div className="ml-auto rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-            API-key lifecycle/cost management still needs dedicated backend config tables.
+          <div className="ml-auto rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+            Live external API usage refreshes every 10 seconds.
           </div>
         </div>
       </div>
@@ -182,16 +209,122 @@ export function APIMonitoring() {
       </div>
 
       <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-        <h2 className="text-lg font-semibold text-gray-900">API Endpoint Monitoring</h2>
-        <p className="mt-1 text-sm text-gray-600">Live endpoint status with response-time bands.</p>
+        <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">External API Live Usage</h2>
+            <p className="mt-1 text-sm text-gray-600">
+              Live usage for the six tracked providers with {windowLabel.toLowerCase()} requests and 24h quota consumption.
+            </p>
+          </div>
+          <div className="text-xs text-gray-500">Daily limit bars use the last 24 hours of provider traffic.</div>
+        </div>
+        <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {externalUsage.map((item) => (
+            <div key={item.provider} className="rounded-xl border border-gray-200 p-5">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-lg font-semibold text-gray-900">{item.label}</p>
+                  <p className="mt-1 text-sm text-gray-500">{item.description}</p>
+                </div>
+                <span
+                  className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                    item.status === "active"
+                      ? "bg-emerald-50 text-emerald-700"
+                      : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  {item.status}
+                </span>
+              </div>
+
+              <div className="mt-5 grid grid-cols-2 gap-4">
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-gray-500">{windowLabel}</p>
+                  <p className="mt-1 text-2xl font-semibold text-gray-900">
+                    {item.requestsWindow.toLocaleString()}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-gray-500">Requests (24h)</p>
+                  <p className="mt-1 text-2xl font-semibold text-gray-900">
+                    {item.requests24h.toLocaleString()}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-5">
+                <div className="mb-2 flex items-center justify-between text-sm">
+                  <span className="font-medium text-gray-900">Daily quota used</span>
+                  <span className="text-gray-600">
+                    {item.requests24h.toLocaleString()} / {item.quota.toLocaleString()} ({item.percentUsed.toFixed(1)}%)
+                  </span>
+                </div>
+                <div className="h-2 rounded-full bg-gray-100">
+                  <div
+                    className="h-2 rounded-full"
+                    style={{
+                      width: `${Math.min(item.percentUsed, 100)}%`,
+                      backgroundColor: item.color,
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div className="mt-5 grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <p className="text-gray-500">Remaining today</p>
+                  <p className="mt-1 font-semibold text-gray-900">{item.remaining.toLocaleString()}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Monthly requests</p>
+                  <p className="mt-1 font-semibold text-gray-900">{item.monthlyRequests.toLocaleString()}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Success (window)</p>
+                  <p className="mt-1 font-semibold text-emerald-700">{item.successWindow.toLocaleString()}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Failed (window)</p>
+                  <p className="mt-1 font-semibold text-red-600">{item.failedWindow.toLocaleString()}</p>
+                </div>
+              </div>
+
+              <div className="mt-5 grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <p className="text-gray-500">API key</p>
+                  <p className="mt-1 font-medium text-gray-900">{item.keyName ?? "Not detected yet"}</p>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {item.keyLast4 ? `****${item.keyLast4}` : "Token hidden"}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Monthly cost</p>
+                  <p className="mt-1 font-medium text-gray-900">
+                    {item.currency} {item.monthlyCost.toFixed(2)}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Last used {item.lastUsed ? new Date(item.lastUsed).toLocaleString() : "not yet"}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+        <h2 className="text-lg font-semibold text-gray-900">External API Endpoint Monitoring</h2>
+        <p className="mt-1 text-sm text-gray-600">
+          Only outbound endpoints from the six tracked providers are listed here.
+        </p>
         <div className="mt-6 overflow-x-auto">
           <table className="w-full min-w-[1040px]">
             <thead className="border-b border-gray-200 bg-gray-50 text-left text-sm text-gray-600">
               <tr>
                 <th className="px-4 py-3 font-medium">State</th>
-                <th className="px-4 py-3 font-medium">API Name</th>
+                <th className="px-4 py-3 font-medium">Provider</th>
                 <th className="px-4 py-3 font-medium">Endpoint</th>
-                <th className="px-4 py-3 font-medium text-right">Requests (24h)</th>
+                <th className="px-4 py-3 font-medium text-right">Requests (window)</th>
                 <th className="px-4 py-3 font-medium text-right">Avg</th>
                 <th className="px-4 py-3 font-medium text-right">P95</th>
                 <th className="px-4 py-3 font-medium text-right">P99</th>
@@ -212,7 +345,9 @@ export function APIMonitoring() {
                       <XCircle className="h-4 w-4 text-red-600" />
                     )}
                   </td>
-                  <td className="px-4 py-4 text-sm font-medium text-gray-900">{item.name}</td>
+                  <td className="px-4 py-4 text-sm font-medium text-gray-900">
+                    {providerLabelMap[item.provider] ?? item.provider}
+                  </td>
                   <td className="px-4 py-4 text-xs font-mono text-gray-600">{item.endpoint}</td>
                   <td className="px-4 py-4 text-sm text-gray-700 text-right">{item.requests24h.toLocaleString()}</td>
                   <td className="px-4 py-4 text-sm text-gray-700 text-right">{item.avgResponseTimeMs}ms</td>
@@ -225,6 +360,11 @@ export function APIMonitoring() {
               ))}
             </tbody>
           </table>
+          {filteredEndpoints.length === 0 ? (
+            <p className="px-4 py-6 text-sm text-gray-500">
+              No monitored external endpoints matched the current filters.
+            </p>
+          ) : null}
         </div>
       </div>
 
@@ -270,15 +410,17 @@ export function APIMonitoring() {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm xl:col-span-2">
-          <h2 className="text-lg font-semibold text-gray-900">Requests per Provider</h2>
-          <p className="mt-1 text-sm text-gray-600">Provider-level request consumption.</p>
+          <h2 className="text-lg font-semibold text-gray-900">Requests per External Provider</h2>
+          <p className="mt-1 text-sm text-gray-600">
+            Selected-window request volume across the six tracked external APIs.
+          </p>
           <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
             <div className="h-72">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={data?.providerUsage ?? []} layout="vertical">
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
                   <XAxis type="number" tickLine={false} axisLine={false} />
-                  <YAxis type="category" dataKey="provider" tickLine={false} axisLine={false} width={96} />
+                  <YAxis type="category" dataKey="provider" tickLine={false} axisLine={false} width={120} />
                   <Tooltip />
                   <Bar dataKey="requests" radius={[0, 8, 8, 0]}>
                     {(data?.providerUsage ?? []).map((row) => (
@@ -360,7 +502,9 @@ export function APIMonitoring() {
             <tbody>
               {(data?.apiKeys ?? []).map((row) => (
                 <tr key={row.keyName} className="border-b border-gray-100">
-                  <td className="px-4 py-3 text-sm text-gray-700">{row.provider}</td>
+                  <td className="px-4 py-3 text-sm text-gray-700">
+                    {providerLabelMap[row.provider] ?? row.provider}
+                  </td>
                   <td className="px-4 py-3 text-sm font-medium text-gray-900">{row.keyName}</td>
                   <td className="px-4 py-3 text-sm text-gray-700">
                     {row.keyLast4 ? `****${row.keyLast4}` : "N/A"}
@@ -387,14 +531,14 @@ export function APIMonitoring() {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-gray-900">Rate Limit Monitoring</h2>
+          <h2 className="text-lg font-semibold text-gray-900">Daily API Limits</h2>
           <div className="mt-4 space-y-4">
-            {(data?.rateLimits ?? []).map((row) => (
+            {externalUsage.map((row) => (
               <div key={row.provider}>
                 <div className="mb-1 flex items-center justify-between text-sm">
-                  <span className="font-medium text-gray-900">{row.provider}</span>
+                  <span className="font-medium text-gray-900">{providerLabelMap[row.provider] ?? row.provider}</span>
                   <span className="text-gray-600">
-                    {row.used.toLocaleString()} / {row.quota.toLocaleString()} ({row.percentUsed.toFixed(1)}%)
+                    {row.requests24h.toLocaleString()} / {row.quota.toLocaleString()} ({row.percentUsed.toFixed(1)}%)
                   </span>
                 </div>
                 <div className="h-2 rounded-full bg-gray-100">
@@ -411,7 +555,7 @@ export function APIMonitoring() {
                 </div>
               </div>
             ))}
-            {(data?.rateLimits.length ?? 0) === 0 ? (
+            {externalUsage.length === 0 ? (
               <p className="text-sm text-gray-500">No rate-limit usage yet.</p>
             ) : null}
           </div>
@@ -444,7 +588,9 @@ export function APIMonitoring() {
               <tbody>
                 {(data?.costMonitoring.monthlyBreakdown ?? []).map((row) => (
                   <tr key={row.provider} className="border-b border-gray-100">
-                    <td className="px-4 py-3 text-sm text-gray-900">{row.provider}</td>
+                    <td className="px-4 py-3 text-sm text-gray-900">
+                      {providerLabelMap[row.provider] ?? row.provider}
+                    </td>
                     <td className="px-4 py-3 text-right text-sm text-gray-700">{row.requests.toLocaleString()}</td>
                     <td className="px-4 py-3 text-right text-sm text-gray-700">
                       {data?.costMonitoring.currency} {row.costPerRequest.toFixed(6)}

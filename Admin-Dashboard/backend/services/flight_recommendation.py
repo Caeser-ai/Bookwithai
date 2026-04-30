@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from services.external_api_monitoring import monitored_openai_chat_completion
+
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -30,6 +32,8 @@ def rank_and_recommend_flights(
     dest_city: str = "",
     preferred_airlines: Optional[List[str]] = None,
     preference_goal: Optional[str] = None,
+    meal_preference: Optional[str] = None,
+    time_window: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int, str]:
     """
     Rank flights, add pros/cons to each, and produce one recommended option with explanation.
@@ -48,9 +52,10 @@ def rank_and_recommend_flights(
     if not client or not ENABLE_AI_FLIGHT_RANKING:
         return fallback_order
 
-    # Build a compact summary for the model (no huge payloads)
+    # Build a compact summary for the model from the strongest heuristic candidates.
+    model_candidates = flights[:15]
     summary = []
-    for i, f in enumerate(flights):
+    for i, f in enumerate(model_candidates):
         analysis = f.get("analysis") or {}
         comparison = f.get("comparison") or {}
         convenience = f.get("convenience") or {}
@@ -89,6 +94,8 @@ def rank_and_recommend_flights(
             },
             "within_budget": analysis.get("withinBudget"),
             "preferred_airline_match": analysis.get("preferredAirlineMatch"),
+            "meal_preference_match": analysis.get("mealPreferenceMatched"),
+            "time_window_match": analysis.get("timeWindowMatched"),
             "perks": f.get("perks") or [],
         })
 
@@ -113,6 +120,8 @@ Flights (index, airline, price, duration, stops, reliability, convenience, marke
 User budget: {budget if budget else 'Not specified'} {currency}
 Preferred airlines: {", ".join(preferred_airlines) if preferred_airlines else 'None specified'}
 Ranking goal: {preference_goal or 'best_overall'}
+Meal preference: {meal_preference or 'None specified'}
+Preferred departure window: {time_window or 'None specified'}
 {('Weather at ' + weather_origin_str) if weather_origin_str else ''}
 {('Weather at ' + weather_dest_str) if weather_dest_str else ''}
 
@@ -140,7 +149,9 @@ Rules:
 - Each entry in "flights" must have index, pros (array of strings), and cons (array of strings)."""
 
     try:
-        resp = client.chat.completions.create(
+        resp = monitored_openai_chat_completion(
+            client,
+            path="/external/openai/flight-ranking",
             model=FLIGHT_RANKING_MODEL,
             messages=[
                 {"role": "system", "content": "You output only valid JSON. No markdown, no explanation outside the JSON."},
@@ -159,22 +170,22 @@ Rules:
     except Exception:
         return fallback_order
 
-    ranked_indices = data.get("ranked_indices") or list(range(len(flights)))
+    ranked_indices = data.get("ranked_indices") or list(range(len(model_candidates)))
     recommended_index = data.get("recommended_index", 0)
     recommendation_explanation = data.get("recommendation_explanation") or ""
     flight_meta = {item["index"]: item for item in (data.get("flights") or [])}
     ranked_indices, recommended_index = _normalize_ranked_choice(
         ranked_indices,
         recommended_index,
-        len(flights),
+        len(model_candidates),
     )
 
     # Build new list: order by rank, attach pros/cons and is_recommended
     ordered: List[Dict[str, Any]] = []
     for rank_pos, idx in enumerate(ranked_indices[:10]):
-        if idx < 0 or idx >= len(flights):
+        if idx < 0 or idx >= len(model_candidates):
             continue
-        f = dict(flights[idx])
+        f = dict(model_candidates[idx])
         f["rank"] = rank_pos + 1
         meta = flight_meta.get(idx, {})
         fallback_pros, fallback_cons = _rule_based_pros_cons(
@@ -196,6 +207,29 @@ Rules:
     if not ordered:
         return fallback_order
 
+    seen_flight_keys = {_flight_identity(flight) for flight in ordered}
+    remaining_pool = [
+        dict(flight)
+        for flight in flights
+        if _flight_identity(flight) not in seen_flight_keys
+    ]
+    for flight in remaining_pool:
+        pros, cons = _rule_based_pros_cons(
+            flight,
+            budget=budget,
+            preferred_airlines=preferred_airlines,
+        )
+        flight["rank"] = len(ordered) + 1
+        flight["pros"] = pros
+        flight["cons"] = cons
+        flight["is_recommended"] = False
+        ranking = flight.setdefault("ranking", {})
+        ranking["pros"] = pros
+        ranking["cons"] = cons
+        ranking["recommended"] = False
+        ranking["aiScore"] = None
+        ordered.append(flight)
+
     rec_idx_in_ordered = next((i for i, f in enumerate(ordered) if f.get("is_recommended")), 0)
     if not recommendation_explanation and ordered:
         recommendation_explanation = _fallback_recommendation_explanation(ordered[rec_idx_in_ordered])
@@ -211,7 +245,7 @@ def _build_fallback_order(
         (dict(flight) for flight in flights),
         key=lambda flight: float(((flight.get("analysis") or {}).get("overallScore")) or flight.get("score") or 0.0),
         reverse=True,
-    )[:10]
+    )
     for index, flight in enumerate(ordered):
         pros, cons = _rule_based_pros_cons(
             flight,
@@ -230,6 +264,16 @@ def _build_fallback_order(
 
     explanation = _fallback_recommendation_explanation(ordered[0]) if ordered else ""
     return (ordered, 0, explanation)
+
+
+def _flight_identity(flight: Dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(flight.get("flight_id") or ""),
+        str(flight.get("airline") or ""),
+        str(flight.get("flight_number") or ""),
+        str(flight.get("departure_at") or flight.get("departure_time") or ""),
+        str(((flight.get("route") or {}).get("originIata")) or flight.get("from_iata") or ""),
+    )
 
 
 def _normalize_ranked_choice(
@@ -301,6 +345,16 @@ def _rule_based_pros_cons(
         pros.append("Matches preferred airline")
     elif preferred_airlines:
         cons.append("Not a preferred airline")
+
+    if analysis.get("mealPreferenceMatched") is True:
+        pros.append("Matches meal preference")
+    elif analysis.get("mealPreference") and analysis.get("mealPreferenceMatched") is False:
+        cons.append("Meal preference not confirmed")
+
+    if analysis.get("timeWindowMatched") is True:
+        pros.append("Matches preferred departure time")
+    elif analysis.get("timeWindowPreference") and analysis.get("timeWindowMatched") is False:
+        cons.append("Outside preferred departure time")
 
     reliability = operations.get("reliabilityScore")
     if reliability is not None:
